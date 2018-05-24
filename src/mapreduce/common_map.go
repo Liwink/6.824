@@ -66,20 +66,21 @@ func doMap(
 	check(err)
 	result := mapF(inFile, string(dat))
 
-	files := make(map[string] *os.File)
-	encoders := make(map[string] *json.Encoder)
+	files := make(map[int] *os.File)
+	encoders := make(map[int] *json.Encoder)
 
 	for _, kv := range result{
-		encoder := encoders[kv.Key]
+		key := ihash(kv.Key)
+		encoder := encoders[key]
 		if encoder == nil {
-			outFile := reduceName(jobName, mapTask, ihash(kv.Key))
+			outFile := reduceName(jobName, mapTask, key)
 
 			f, err := os.Open(outFile)
 			check(err)
 
-			files[kv.Key] = f
+			files[key] = f
 			encoder = json.NewEncoder(f)
-			encoders[kv.Key] = encoder
+			encoders[key] = encoder
 		}
 		err = encoder.Encode(&kv)
 		check(err)
