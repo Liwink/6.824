@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-func check(err error) {
+func check_err(err error) {
 	if err != nil {
 		panic(err)
 	}
@@ -63,27 +63,27 @@ func doMap(
 	// Your code here (Part I).
 	//
 	dat, err := ioutil.ReadFile(inFile)
-	check(err)
+	check_err(err)
 	result := mapF(inFile, string(dat))
 
 	files := make(map[int] *os.File)
 	encoders := make(map[int] *json.Encoder)
 
 	for _, kv := range result{
-		key := ihash(kv.Key)
+		key := ihash(kv.Key) % nReduce
 		encoder := encoders[key]
 		if encoder == nil {
 			outFile := reduceName(jobName, mapTask, key)
 
-			f, err := os.Open(outFile)
-			check(err)
+			f, err := os.OpenFile(outFile, os.O_RDWR|os.O_CREATE, 0755)
+			check_err(err)
 
 			files[key] = f
 			encoder = json.NewEncoder(f)
 			encoders[key] = encoder
 		}
 		err = encoder.Encode(&kv)
-		check(err)
+		check_err(err)
 	}
 
 	for _, f := range files {
