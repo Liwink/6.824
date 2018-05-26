@@ -38,13 +38,13 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 
 	for i := 0; i < ntasks; i++ {
 		worker := <- registerChan
-		go func(worker string) {
+		go func(worker string, i int) {
 			defer func() { registerChan <- worker }()
 			defer wg.Done()
 			call(worker, "Worker.DoTask",
-				DoTaskArgs{jobName, mapFiles[i], phase, i, nReduce},
+				DoTaskArgs{jobName, mapFiles[i], phase, i, n_other},
 				new(struct{}))
-		}(worker)
+		}(worker, i)
 	}
 	wg.Wait()
 	fmt.Printf("Schedule: %v done\n", phase)
