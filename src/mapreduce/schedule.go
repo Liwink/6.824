@@ -36,16 +36,30 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	var wg sync.WaitGroup
 	wg.Add(ntasks)
 
-	for i := 0; i < ntasks; i++ {
-		worker := <- registerChan
-		go func(worker string, i int) {
-			defer func() { registerChan <- worker }()
-			defer wg.Done()
-			call(worker, "Worker.DoTask",
-				DoTaskArgs{jobName, mapFiles[i], phase, i, n_other},
-				new(struct{}))
-		}(worker, i)
-	}
+	todoChanel := make(chan int)
+
+	go func() {
+		for i := 0; i < ntasks; i++ {
+			todoChanel <- i
+		}
+	}()
+
+	go func() {
+		for i := range todoChanel {
+			worker := <-registerChan
+			go func(worker string, i int) {
+				defer func() { registerChan <- worker }()
+				ok := call(worker, "Worker.DoTask",
+					DoTaskArgs{jobName, mapFiles[i], phase, i, n_other},
+					new(struct{}))
+				if ok == false {
+					todoChanel <- i
+				} else {
+					wg.Done()
+				}
+			}(worker, i)
+		}
+	}()
 	wg.Wait()
 	fmt.Printf("Schedule: %v done\n", phase)
 }
