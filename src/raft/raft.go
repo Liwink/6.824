@@ -64,6 +64,10 @@ type Raft struct {
 	votedFor int
 	majorityNum int
 
+	validLeaderChan chan int
+	electionTimeoutChan chan int
+
+
 	isLeader bool
 	isLeaderAlive bool
 
@@ -122,10 +126,10 @@ func (rf *Raft) readPersist(data []byte) {
 
 
 type LogEntry struct {
-	term int
-	index int
+	Term int
+	Index int
 	// command
-	command interface{}
+	Command interface{}
 }
 
 
@@ -136,10 +140,10 @@ type LogEntry struct {
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	// todo: 2a
-	term int
-	candidateId int
-	lastLogIndex int
-	lastLogTerm int
+	Term int
+	CandidateId int
+	LastLogIndex int
+	LastLogTerm int
 }
 
 //
@@ -149,30 +153,30 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
 	// Your data here (2A).
 	// todo: 2a
-	term int
-	voteGranted bool
+	Term int
+	VoteGranted bool
 }
 
 type AppendEntriesArgs struct {
-	term int
-	leaderId int
-	prevLogIndex int
-    prevLogTerm int
-    entries []*LogEntry
-    commitIndex int
+	Term int
+	LeaderId int
+	PrevLogIndex int
+    PrevLogTerm int
+    Entries []*LogEntry
+    CommitIndex int
 }
 
 type AppendEntriesReply struct {
-	term int
-	success bool
+	Term int
+	Success bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.term < rf.currentTerm {
+	if args.Term < rf.currentTerm {
 		return
 	}
-    if args.term > rf.currentTerm {
-        rf.currentTerm = args.term
+    if args.Term > rf.currentTerm {
+        rf.currentTerm = args.Term
     }
 
     // If candidate or leader, step down
@@ -182,6 +186,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     rf.mu.Lock()
     rf.isLeaderAlive = true
     rf.mu.Unlock()
+
+    rf.validLeaderChan <- args.LeaderId
 
     // Return failure if log doesn’t contain an entry at
     // prevLogIndex whose term matches prevLogTerm
@@ -209,6 +215,9 @@ func (rf *Raft) sendHeartbeats() {
 		0,
 	}
 	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
 		reply := AppendEntriesReply{}
 		rf.sendAppendEntries(i, &args, &reply)
 	}
@@ -220,20 +229,20 @@ func (rf *Raft) sendHeartbeats() {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// todo: 2a
-	if args.term > rf.currentTerm {
-		rf.currentTerm = args.term
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
 		rf.isLeader = false
 		rf.votedFor = -1
 	}
 
-	if (rf.votedFor == -1 || rf.votedFor == args.candidateId) &&
-			args.term >= rf.currentTerm && args.lastLogIndex >= rf.commitIndex {
-		rf.votedFor = args.candidateId
-		reply.voteGranted = true
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
+			args.Term >= rf.currentTerm && args.LastLogIndex >= rf.commitIndex {
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
 	} else {
-		reply.voteGranted = false
+		reply.VoteGranted = false
 	}
-	reply.term = rf.currentTerm
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -272,9 +281,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendRequestVotes() {
 	// vote for itself
+	rf.currentTerm += 1
 	rf.votedFor = rf.me
-	wg := sync.WaitGroup{}
-	wg.Add(rf.majorityNum)
+
+	responseChan := make(chan bool, 1)
 
 	// requests RPCs in parallel
 	// todo: parallel
@@ -285,30 +295,39 @@ func (rf *Raft) sendRequestVotes() {
 		0,
 	}
 	for i := 0; i < len(rf.peers); i++ {
-		go func() {
+		go func(i int) {
 			reply := RequestVoteReply{}
 			rf.sendRequestVote(i, &args, &reply)
-			if reply.voteGranted {
-				wg.Done()
+			if reply.VoteGranted {
+				responseChan <- true
 			}
-		}()
+		}(i)
 	}
 
 	done := make(chan struct{})
 	go func() {
-		wg.Wait()
+		for i := 0; i < rf.majorityNum; i++ {
+			<- responseChan
+		}
 		close(done)
 	}()
 
 	// a. it wins the election
 	// b. another server establish itself as a leader
 	// c. a period of time goes by with no winner
+	timeout := make(chan int, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		timeout <- 1
+	}()
+
 	select {
-	case <-valiedLeaderChan:
+	case <-rf.validLeaderChan:
 		rf.isLeaderAlive = true
 	case <-done:
 		rf.isLeader = true
-	case <-electionTimeoutChan:
+	//case <-rf.electionTimeoutChan:
+	case <-timeout:
 		fmt.Println("sendRequestVotes timeout")
 	}
 	return
@@ -371,6 +390,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// todo: 2a
 	rf.votedFor = -1
 	rf.isLeaderAlive = false
+	rf.isLeader = false
 	rf.majorityNum = len(rf.peers) / 2 + 1
 
 	// heartbeats
@@ -395,7 +415,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			if rf.isLeaderAlive {
 				rf.isLeaderAlive = false
 			} else {
-				rf.sendRequestVote()
+				go rf.sendRequestVotes()
 			}
 			rf.mu.Unlock()
 
