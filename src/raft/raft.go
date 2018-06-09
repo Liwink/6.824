@@ -54,6 +54,12 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	// todo: 2a
+	currentTerm int
+	votedFor int
+
+	commitIndex int
+	lastApplied int
 
 }
 
@@ -64,6 +70,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	// todo: 2a
+	isleader = rf.votedFor == rf.me
 	return term, isleader
 }
 
@@ -116,6 +124,11 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	// todo: 2a
+	term int
+	candidateId int
+	lastLogIndex int
+	lastLogTerm int
 }
 
 //
@@ -124,6 +137,9 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	// todo: 2a
+	term int
+	voteGranted bool
 }
 
 //
@@ -131,6 +147,14 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	// todo: 2a
+	if (rf.votedFor == -1 || rf.votedFor == args.candidateId) &&
+			args.term >= rf.currentTerm && args.lastLogIndex >= rf.commitIndex {
+		rf.votedFor = args.candidateId
+		reply.voteGranted = true
+	} else {
+		reply.voteGranted = false
+	}
 }
 
 //
@@ -222,6 +246,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	// todo: 2a
+	rf.votedFor = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
