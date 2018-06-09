@@ -18,7 +18,9 @@ package raft
 //
 
 import "sync"
-import "labrpc"
+import (
+	"labrpc"
+)
 
 // import "bytes"
 // import "labgob"
@@ -58,6 +60,9 @@ type Raft struct {
 	currentTerm int
 	votedFor int
 
+	isLeader bool
+	isLeaderAlive bool
+
 	commitIndex int
 	lastApplied int
 
@@ -66,13 +71,9 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (2A).
 	// todo: 2a
-	isleader = rf.votedFor == rf.me
-	return term, isleader
+	return rf.currentTerm, rf.isLeader
 }
 
 
@@ -116,6 +117,12 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 
+type LogEntry struct {
+	term int
+	index int
+	// command
+	command interface{}
+}
 
 
 //
@@ -140,6 +147,67 @@ type RequestVoteReply struct {
 	// todo: 2a
 	term int
 	voteGranted bool
+}
+
+type AppendEntriesArgs struct {
+	term int
+	leaderId int
+	prevLogIndex int
+    prevLogTerm int
+    entries []*LogEntry
+    commitIndex int
+}
+
+type AppendEntriesReply struct {
+	term int
+	success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.term < rf.currentTerm {
+		return
+	}
+    if args.term > rf.currentTerm {
+        rf.currentTerm = args.term
+    }
+
+    // If candidate or leader, step down
+    rf.isLeader = false
+
+    // Reset election timeout
+    rf.mu.Lock()
+    rf.isLeaderAlive = true
+    rf.mu.Unlock()
+
+    // Return failure if log doesn’t contain an entry at
+    // prevLogIndex whose term matches prevLogTerm
+
+    // If existing entries conflict with new entries, delete all
+    // existing entries starting with first conflicting entry
+
+    // Append any new entries not already in the log
+
+    // Advance state machine with newly committed entries
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendHeartbeats() {
+	args := AppendEntriesArgs{
+		rf.currentTerm,
+		rf.me,
+		0,
+		0,
+		nil,
+		0,
+	}
+	for i := 0; i < len(rf.peers); i++ {
+		reply := AppendEntriesReply{}
+		rf.sendAppendEntries(i, &args, &reply)
+	}
 }
 
 //
@@ -248,6 +316,37 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	// todo: 2a
 	rf.votedFor = -1
+
+	// heartbeats
+	//go func() {
+	//	for {
+	//		time.Sleep(150 * time.Millisecond)
+	//		_, isLeader := rf.GetState()
+	//		if isLeader {
+	//			rf.send
+	//		}
+	//	}
+	//}()
+
+	// selection
+	//go func() {
+	//	for {
+	//		time.Sleep(time.Duration(350 + rand.Intn(200)) * time.Millisecond)
+	//		_, isLeader := rf.GetState()
+	//		if isLeader {
+	//			continue
+	//		}
+	//
+	//		rf.mu.Lock()
+	//		if rf.isLeaderAlive {
+	//			rf.isLeaderAlive = false
+	//		}
+	//		rf.mu.Unlock()
+	//
+	//		// election
+	//
+	//	}
+	//}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
