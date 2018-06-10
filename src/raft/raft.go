@@ -23,6 +23,7 @@ import (
 	"time"
 	"math/rand"
 	"fmt"
+	"strconv"
 )
 
 // import "bytes"
@@ -186,7 +187,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		return
 	} else {
-		rf.currentTerm = args.Term
+		rf.updateTerm(args.Term)
 		reply.Term = rf.currentTerm
 	}
 
@@ -199,18 +200,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     // Advance state machine with newly committed entries
 
 
-	// Reset election timeout
-	rf.mu.Lock()
 	rf.isLeaderAlive = true
-	// fixme: what if currentState change to LeaderState
-	if rf.currentState == candidateState {
-		rf.validLeaderChan <- args.LeaderId
-	}
-	rf.currentState = followState
-	rf.mu.Unlock()
 
 	reply.Success = true
-	rf.log("hear heartbeats")
+	rf.log("follower: received heartbeats")
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -256,10 +249,24 @@ func (rf *Raft) sendHeartbeats() {
 
 	select {
 	case <-done:
-		rf.log("heartbeats connected")
+		rf.log("leader: received responses")
 		rf.isLeaderAlive = true
 	case <-timeoutChan:
-		rf.log("heartbeats timeout")
+		rf.log("leader: did not get majority responses, timeout")
+	}
+}
+
+func (rf *Raft) updateTerm(term int) {
+	if term > rf.currentState {
+		rf.log("update term and become a follower")
+		rf.currentTerm = term
+		// Reset election timeout
+		// fixme: what if currentState change to LeaderState
+		if rf.currentState == candidateState {
+			rf.validLeaderChan <- 0
+		}
+		rf.currentState = followState
+		rf.votedFor = -1
 	}
 }
 
@@ -270,14 +277,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// todo: 2a
 	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.currentState = followState
-		rf.votedFor = -1
+		rf.updateTerm(args.Term)
 	}
 
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 			args.Term >= rf.currentTerm && args.LastLogIndex >= rf.commitIndex {
 		rf.votedFor = args.CandidateId
+		rf.log("follow: vote for " + strconv.Itoa(args.CandidateId))
 		reply.VoteGranted = true
 	} else {
 		reply.VoteGranted = false
@@ -321,7 +327,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendRequestVotes() {
 	// vote for itself
-	rf.log("send Request Votes")
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
 
@@ -346,8 +351,7 @@ func (rf *Raft) sendRequestVotes() {
 			rf.mu.Lock()
 			// todo: if its term is out of date, it immediately reverts to follower state
 			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				timeout <- struct{}{}
+				rf.updateTerm(reply.Term)
 			}
 			rf.mu.Unlock()
 
@@ -376,17 +380,17 @@ func (rf *Raft) sendRequestVotes() {
 	// fixme: lock?
 	select {
 	case <-rf.validLeaderChan:
-		rf.log("another leader established")
+		rf.log("candidate: another leader established or should update term")
 		rf.currentState = followState
 		rf.isLeaderAlive = true
 	case <-done:
 		rf.currentState = leaderState
 		rf.isLeaderAlive = true
-		rf.log("selected as a leader")
+		rf.log("candidate: selected as a leader")
 	//case <-rf.electionTimeoutChan:
 	case <-timeout:
 		rf.currentState = followState
-		rf.log("sendRequestVotes timeout or should update term")
+		rf.log("candidate: sendRequestVotes timeout")
 	}
 	return
 }
@@ -434,6 +438,7 @@ func (rf *Raft) electionDaemon() {
 		if rf.isLeaderAlive {
 			rf.isLeaderAlive = false
 		} else {
+			rf.log("candidate: start election")
 			rf.currentState = candidateState
 			go rf.sendRequestVotes()
 		}
