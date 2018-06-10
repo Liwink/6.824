@@ -21,8 +21,8 @@ import "sync"
 import (
 	"labrpc"
 	"time"
-	"math/rand"
 	"fmt"
+	"math/rand"
 )
 
 // import "bytes"
@@ -63,12 +63,13 @@ type Raft struct {
 	currentTerm int
 	votedFor int
 	majorityNum int
+	totalNum int
 
 	validLeaderChan chan int
-	electionTimeoutChan chan int
 
 
 	isLeader bool
+	isCandidate bool
 	isLeaderAlive bool
 
 	commitIndex int
@@ -185,9 +186,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     // Reset election timeout
     rf.mu.Lock()
     rf.isLeaderAlive = true
+    if rf.isCandidate {
+		rf.validLeaderChan <- args.LeaderId
+	}
     rf.mu.Unlock()
 
-    rf.validLeaderChan <- args.LeaderId
 
     // Return failure if log doesn’t contain an entry at
     // prevLogIndex whose term matches prevLogTerm
@@ -214,7 +217,7 @@ func (rf *Raft) sendHeartbeats() {
 		nil,
 		0,
 	}
-	for i := 0; i < len(rf.peers); i++ {
+	for i := 0; i < rf.totalNum; i++ {
 		if i == rf.me {
 			continue
 		}
@@ -284,17 +287,16 @@ func (rf *Raft) sendRequestVotes() {
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
 
-	responseChan := make(chan bool, 1)
+	responseChan := make(chan bool, rf.totalNum)
 
 	// requests RPCs in parallel
-	// todo: parallel
 	args := RequestVoteArgs{
 		rf.currentTerm,
 		rf.me,
 		0,
 		0,
 	}
-	for i := 0; i < len(rf.peers); i++ {
+	for i := 0; i < rf.totalNum; i++ {
 		go func(i int) {
 			reply := RequestVoteReply{}
 			rf.sendRequestVote(i, &args, &reply)
@@ -368,6 +370,26 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) electionDaemon() {
+	for {
+		time.Sleep(time.Duration(350 + rand.Intn(200)) * time.Millisecond)
+		if rf.isLeader {
+			continue
+		}
+
+		rf.mu.Lock()
+		if rf.isLeaderAlive {
+			rf.isLeaderAlive = false
+		} else {
+			rf.isCandidate = true
+			go rf.sendRequestVotes()
+		}
+		rf.mu.Unlock()
+
+		// election
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -391,7 +413,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.isLeaderAlive = false
 	rf.isLeader = false
-	rf.majorityNum = len(rf.peers) / 2 + 1
+	rf.totalNum = len(rf.peers)
+	rf.majorityNum = rf.totalNum / 2 + 1
 
 	// heartbeats
 	go func() {
@@ -404,25 +427,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 
 	// selection
-	go func() {
-		for {
-			time.Sleep(time.Duration(350 + rand.Intn(200)) * time.Millisecond)
-			if rf.isLeader {
-				continue
-			}
-
-			rf.mu.Lock()
-			if rf.isLeaderAlive {
-				rf.isLeaderAlive = false
-			} else {
-				go rf.sendRequestVotes()
-			}
-			rf.mu.Unlock()
-
-			// election
-
-		}
-	}()
+	go rf.electionDaemon()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
