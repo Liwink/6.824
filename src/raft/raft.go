@@ -48,9 +48,9 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-const followState  = 0
-const leaderState  = 1
-const candidateState  = 2
+const followState = "follower"
+const leaderState  = "leader"
+const candidateState  = "candidate"
 
 //
 // A Go object implementing a single Raft peer.
@@ -71,8 +71,9 @@ type Raft struct {
 	totalNum int
 
 	validLeaderChan chan int
+	name int
 
-	currentState int
+	currentState string
 
 	isLeaderAlive bool
 
@@ -82,7 +83,7 @@ type Raft struct {
 }
 
 func (rf *Raft)log(str string)  {
-	fmt.Println(rf.me, rf.currentTerm, str)
+	fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
 }
 
 // return currentTerm and whether this server
@@ -90,6 +91,8 @@ func (rf *Raft)log(str string)  {
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	// todo: 2a
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.currentState == leaderState
 }
 
@@ -182,6 +185,8 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	reply.Success = false
+
+	rf.mu.Lock()
 	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm {
@@ -190,6 +195,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.updateTerm(args.Term)
 		reply.Term = rf.currentTerm
 	}
+	rf.mu.Unlock()
 
 	// todo: compare last log term
     // If existing entries conflict with new entries, delete all
@@ -200,10 +206,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     // Advance state machine with newly committed entries
 
 
+    rf.mu.Lock()
 	rf.isLeaderAlive = true
+	rf.mu.Unlock()
 
 	reply.Success = true
+	rf.mu.Lock()
 	rf.log("follower: received heartbeats")
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -212,6 +222,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) sendHeartbeats() {
+	rf.mu.Lock()
 	args := AppendEntriesArgs{
 		rf.currentTerm,
 		rf.me,
@@ -220,6 +231,8 @@ func (rf *Raft) sendHeartbeats() {
 		nil,
 		0,
 	}
+	rf.mu.Unlock()
+
 	timeoutChan := make(chan struct{}, 1)
 	aliveChan := make(chan struct{}, rf.totalNum)
 	done := make(chan struct{}, 1)
@@ -249,17 +262,24 @@ func (rf *Raft) sendHeartbeats() {
 
 	select {
 	case <-done:
+		rf.mu.Lock()
 		rf.log("leader: received responses")
 		rf.isLeaderAlive = true
+		rf.mu.Unlock()
 	case <-timeoutChan:
+		rf.mu.Lock()
 		rf.log("leader: did not get majority responses, timeout")
+		rf.mu.Unlock()
 	}
 }
 
 func (rf *Raft) updateTerm(term int) {
-	if term > rf.currentState {
+	if term > rf.currentTerm {
 		rf.log("update term and become a follower")
+		// lock write term
+		rf.log("term update before")
 		rf.currentTerm = term
+		rf.log("term update after")
 		// Reset election timeout
 		// fixme: what if currentState change to LeaderState
 		if rf.currentState == candidateState {
@@ -276,9 +296,11 @@ func (rf *Raft) updateTerm(term int) {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// todo: 2a
+	rf.mu.Lock()
 	if args.Term > rf.currentTerm {
 		rf.updateTerm(args.Term)
 	}
+	reply.Term = rf.currentTerm
 
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 			args.Term >= rf.currentTerm && args.LastLogIndex >= rf.commitIndex {
@@ -288,7 +310,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		reply.VoteGranted = false
 	}
-	reply.Term = rf.currentTerm
+	rf.mu.Unlock()
 }
 
 //
@@ -327,19 +349,25 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendRequestVotes() {
 	// vote for itself
+	rf.mu.Lock()
+	rf.log("term increase before")
 	rf.currentTerm += 1
+	rf.log("term increase after")
 	rf.votedFor = rf.me
 
-	responseChan := make(chan bool, rf.totalNum)
-	timeout := make(chan struct{}, 1)
-
-	// requests RPCs in parallel
 	args := RequestVoteArgs{
 		rf.currentTerm,
 		rf.me,
 		0,
 		0,
 	}
+	rf.mu.Unlock()
+
+
+	responseChan := make(chan bool, rf.totalNum)
+	timeout := make(chan struct{}, 1)
+
+	// requests RPCs in parallel
 	for i := 0; i < rf.totalNum; i++ {
 		go func(i int) {
 			if i == rf.me {
@@ -380,17 +408,25 @@ func (rf *Raft) sendRequestVotes() {
 	// fixme: lock?
 	select {
 	case <-rf.validLeaderChan:
-		rf.log("candidate: another leader established or should update term")
+		rf.mu.Lock()
 		rf.currentState = followState
 		rf.isLeaderAlive = true
+		rf.log("candidate: another leader established or should update term")
+		rf.mu.Unlock()
 	case <-done:
+		rf.mu.Lock()
 		rf.currentState = leaderState
 		rf.isLeaderAlive = true
 		rf.log("candidate: selected as a leader")
+		rf.mu.Unlock()
+
+		go rf.sendHeartbeats()
 	//case <-rf.electionTimeoutChan:
 	case <-timeout:
+		rf.mu.Lock()
 		rf.currentState = followState
 		rf.log("candidate: sendRequestVotes timeout")
+		rf.mu.Unlock()
 	}
 	return
 }
@@ -411,12 +447,17 @@ func (rf *Raft) sendRequestVotes() {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	rf.log("start")
+	rf.mu.Unlock()
 	index := -1
 	term := -1
 
 	// Your code here (2B).
 
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return index, term, rf.currentState == leaderState
 }
 
@@ -428,6 +469,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.mu.Lock()
+	rf.log("Kill")
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) electionDaemon() {
@@ -466,6 +510,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.name = rand.Intn(10000)
+
+	rf.mu.Lock()
+	rf.log("make")
+	rf.mu.Unlock()
+
 	// Your initialization code here (2A, 2B, 2C).
 	// todo: 2a
 	rf.votedFor = -1
@@ -473,14 +523,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.totalNum = len(rf.peers)
 	rf.majorityNum = rf.totalNum / 2 + 1
 	rf.currentState = followState
+	rf.validLeaderChan = make(chan int, 1)
+
 
 	// heartbeats
 	go func() {
 		for {
 			time.Sleep(150 * time.Millisecond)
+			rf.mu.Lock()
 			if rf.currentState == leaderState {
-				rf.sendHeartbeats()
+				go rf.sendHeartbeats()
 			}
+			rf.mu.Unlock()
 		}
 	}()
 
