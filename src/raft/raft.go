@@ -70,6 +70,7 @@ type Raft struct {
 	majorityNum int
 	totalNum int
 
+	killChan chan struct{}
 	validLeaderChan chan int
 	name int
 
@@ -471,12 +472,20 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	rf.log("Kill")
+	rf.killChan <- struct{}{}
+	rf.killChan <- struct{}{}
 	rf.mu.Unlock()
 }
 
 func (rf *Raft) electionDaemon() {
 	for {
 		time.Sleep(time.Duration(350 + rand.Intn(300)) * time.Millisecond)
+
+		select {
+		case <- rf.killChan:
+			return
+		default:
+		}
 
 		rf.mu.Lock()
 		if rf.isLeaderAlive {
@@ -525,11 +534,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentState = followState
 	rf.validLeaderChan = make(chan int, 1)
 
+	rf.killChan = make(chan struct{}, 2)
+
 
 	// heartbeats
 	go func() {
 		for {
 			time.Sleep(150 * time.Millisecond)
+			select {
+			case <- rf.killChan:
+				return
+			default:
+
+			}
 			rf.mu.Lock()
 			if rf.currentState == leaderState {
 				go rf.sendHeartbeats()
