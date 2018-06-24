@@ -78,8 +78,13 @@ type Raft struct {
 
 	isLeaderAlive bool
 
+	// 2B
+	logs []*LogEntry
 	commitIndex int
 	lastApplied int
+
+	nextIndex []int
+	matchIndex []int
 
 }
 
@@ -174,9 +179,9 @@ type AppendEntriesArgs struct {
 	Term int
 	LeaderId int
 	PrevLogIndex int
-    PrevLogTerm int
-    Entries []*LogEntry
-    CommitIndex int
+	PrevLogTerm int
+	Entries []*LogEntry
+	CommitIndex int
 }
 
 type AppendEntriesReply struct {
@@ -200,18 +205,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// todo: compare last log term
-    // If existing entries conflict with new entries, delete all
-    // existing entries starting with first conflicting entry
+	// If existing entries conflict with new entries, delete all
+	// existing entries starting with first conflicting entry
 
-    // Append any new entries not already in the log
+	// Append any new entries not already in the log
 
-    // Advance state machine with newly committed entries
+	// Advance state machine with newly committed entries
 
 
 	rf.isLeaderAlive = true
+	// heartbeat
+	if len(args.Entries) == 0 {
+		reply.Success = true
+		rf.log("follower: received heartbeats")
+		return
+	}
 
-	reply.Success = true
-	rf.log("follower: received heartbeats")
+	if args.PrevLogIndex == -1 {
+		rf.logs = args.Entries
+		reply.Success = true
+	} else if args.PrevLogIndex < len(rf.logs) && rf.logs[args.PrevLogIndex].Term == args.Term {
+		rf.logs = append(rf.logs[:args.PrevLogIndex + 1], args.Entries...)
+		reply.Success = true
+	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -227,7 +243,7 @@ func (rf *Raft) sendHeartbeats() {
 		0,
 		0,
 		nil,
-		0,
+		rf.commitIndex,
 	}
 	rf.mu.Unlock()
 
@@ -240,8 +256,8 @@ func (rf *Raft) sendHeartbeats() {
 		}
 		go func(i int) {
 			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(i, &args, &reply)
-			if reply.Success == true {
+			ok := rf.sendAppendEntries(i, &args, &reply)
+			if ok && reply.Success == true {
 				aliveChan <- struct{}{}
 			}
 		}(i)
@@ -268,6 +284,54 @@ func (rf *Raft) sendHeartbeats() {
 		rf.mu.Lock()
 		rf.log("leader: did not get majority responses, timeout")
 		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) appendEntries() {
+	for i := 0; i < rf.totalNum; i++ {
+		//
+		if i == rf.me {
+			continue
+		}
+		go func(i int) {
+			// TODO: to ensure only one goroutine is working for one specific follower
+			for {
+				rf.mu.Lock()
+				if rf.nextIndex[i] > rf.commitIndex {
+					return
+				}
+				prevIndex := rf.nextIndex[i] - 1
+				args := AppendEntriesArgs{
+					rf.currentTerm,
+					rf.me,
+					prevIndex,
+					rf.logs[prevIndex].Term,
+					rf.logs[prevIndex + 1:],
+					rf.commitIndex,
+				}
+				rf.mu.Unlock()
+
+				reply := AppendEntriesReply{}
+				ok := rf.sendAppendEntries(i, &args, &reply)
+				if !ok {
+					return
+				}
+				if reply.Success {
+					// TODO: success
+					rf.mu.Lock()
+					rf.nextIndex[i] = args.CommitIndex + 1
+					rf.mu.Unlock()
+					return
+				} else if reply.Term > rf.currentTerm {
+					// TODO
+					return
+				} else {
+					rf.mu.Lock()
+					rf.nextIndex[i] -= 1
+					rf.mu.Unlock()
+				}
+			}
+		}(i)
 	}
 }
 
@@ -301,7 +365,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-			args.Term >= rf.currentTerm && args.LastLogIndex >= rf.commitIndex {
+		args.Term >= rf.currentTerm && args.LastLogIndex >= rf.commitIndex {
 		rf.votedFor = args.CandidateId
 		rf.log("follow: vote for " + strconv.Itoa(args.CandidateId))
 		reply.VoteGranted = true
@@ -416,11 +480,14 @@ func (rf *Raft) sendRequestVotes() {
 		rf.mu.Lock()
 		rf.currentState = leaderState
 		rf.isLeaderAlive = true
+		for i, _ := range rf.nextIndex {
+			rf.nextIndex[i] = rf.commitIndex + 1
+		}
 		rf.log("candidate: selected as a leader")
 		rf.mu.Unlock()
 
 		go rf.sendHeartbeats()
-	//case <-rf.electionTimeoutChan:
+		//case <-rf.electionTimeoutChan:
 	case <-timeout:
 		rf.mu.Lock()
 		rf.currentState = followState
@@ -435,8 +502,8 @@ func (rf *Raft) sendRequestVotes() {
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
+// agreement and **return immediately**. **there is no guarantee that this
+// command will ever be committed to the Raft log**, since the leader
 // may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
 //
@@ -447,17 +514,23 @@ func (rf *Raft) sendRequestVotes() {
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	rf.log("start")
-	rf.mu.Unlock()
-	index := -1
-	term := -1
+
+	if rf.currentState != leaderState {
+		return rf.commitIndex, rf.currentTerm, false
+	}
 
 	// Your code here (2B).
+	rf.logs = append(rf.logs, &LogEntry{rf.currentTerm, rf.commitIndex, command})
+	rf.commitIndex += 1
 
+	go rf.appendEntries()
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return index, term, rf.currentState == leaderState
+	// TODO: update state
+
+	return rf.commitIndex, rf.currentTerm, rf.currentState == leaderState
 }
 
 //
@@ -533,6 +606,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.validLeaderChan = make(chan int, 1)
 
 	rf.killChan = make(chan struct{}, 2)
+
+	// 2b
+	rf.commitIndex = 0
+	rf.logs = make([]*LogEntry, 0)
+	rf.nextIndex = make([]int, rf.totalNum)
 
 
 	// heartbeats
