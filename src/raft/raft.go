@@ -188,6 +188,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = false
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm {
@@ -196,7 +198,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.updateTerm(args.Term)
 		reply.Term = rf.currentTerm
 	}
-	rf.mu.Unlock()
 
 	// todo: compare last log term
     // If existing entries conflict with new entries, delete all
@@ -207,14 +208,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     // Advance state machine with newly committed entries
 
 
-    rf.mu.Lock()
 	rf.isLeaderAlive = true
-	rf.mu.Unlock()
 
 	reply.Success = true
-	rf.mu.Lock()
 	rf.log("follower: received heartbeats")
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -309,6 +306,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.log("follow: vote for " + strconv.Itoa(args.CandidateId))
 		reply.VoteGranted = true
 	} else {
+		rf.log("refuse to vote for" + strconv.Itoa(args.CandidateId))
 		reply.VoteGranted = false
 	}
 	rf.mu.Unlock()
