@@ -22,8 +22,8 @@ import (
 	"labrpc"
 	"time"
 	"math/rand"
-	"fmt"
 	"strconv"
+	"fmt"
 )
 
 // import "bytes"
@@ -85,6 +85,8 @@ type Raft struct {
 
 	nextIndex []int
 	matchIndex []int
+	applyCh chan ApplyMsg
+	applyIndex int
 
 }
 
@@ -182,11 +184,22 @@ type AppendEntriesArgs struct {
 	PrevLogTerm int
 	Entries []*LogEntry
 	CommitIndex int
+	ApplyIndex int
 }
 
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+}
+
+func (rf *Raft) apply(applyIndex int)  {
+	rf.applyCh <- ApplyMsg{
+		true,
+		rf.logs[applyIndex].Command,
+		applyIndex,
+	}
+	rf.log(fmt.Sprintf("Apply: %d", applyIndex))
+
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -217,17 +230,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// heartbeat
 	if len(args.Entries) == 0 {
 		reply.Success = true
+		if rf.applyIndex < args.ApplyIndex {
+			for i := rf.applyIndex + 1; i <= args.ApplyIndex; i++ {
+				rf.apply(i)
+			}
+			rf.applyIndex = args.ApplyIndex
+		}
 		rf.log("follower: received heartbeats")
 		return
 	}
 
 	if args.PrevLogIndex == -1 {
 		rf.logs = args.Entries
+		rf.commitIndex = args.CommitIndex
 		reply.Success = true
 	} else if args.PrevLogIndex < len(rf.logs) && rf.logs[args.PrevLogIndex].Term == args.Term {
 		rf.logs = append(rf.logs[:args.PrevLogIndex + 1], args.Entries...)
+		rf.commitIndex = args.CommitIndex
 		reply.Success = true
 	}
+	rf.log(fmt.Sprintf("AppendEntries: len(logs) %d", len(rf.logs)))
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -244,6 +266,7 @@ func (rf *Raft) sendHeartbeats() {
 		0,
 		nil,
 		rf.commitIndex,
+		rf.applyIndex,
 	}
 	rf.mu.Unlock()
 
@@ -287,7 +310,13 @@ func (rf *Raft) sendHeartbeats() {
 	}
 }
 
-func (rf *Raft) appendEntries() {
+func (rf *Raft) appendEntries(commitIndex int) {
+	// TODO: stop it when changing leader...?
+
+
+	receivedCh := make(chan struct{}, rf.totalNum)
+	done := make(chan struct{}, 1)
+
 	for i := 0; i < rf.totalNum; i++ {
 		//
 		if i == rf.me {
@@ -297,17 +326,24 @@ func (rf *Raft) appendEntries() {
 			// TODO: to ensure only one goroutine is working for one specific follower
 			for {
 				rf.mu.Lock()
-				if rf.nextIndex[i] > rf.commitIndex {
+				if rf.nextIndex[i] > commitIndex {
+					receivedCh <- struct{}{}
 					return
 				}
 				prevIndex := rf.nextIndex[i] - 1
+				term := 0
+				if prevIndex != -1 {
+					term = rf.logs[prevIndex].Term
+				}
+				rf.log(fmt.Sprintf("Send logs: prevIndex %d, len(logs) %d", prevIndex, len(rf.logs[prevIndex + 1:])))
 				args := AppendEntriesArgs{
 					rf.currentTerm,
 					rf.me,
 					prevIndex,
-					rf.logs[prevIndex].Term,
-					rf.logs[prevIndex + 1:],
-					rf.commitIndex,
+					term,
+					rf.logs[prevIndex + 1:commitIndex + 1],
+					commitIndex,
+					rf.applyIndex,
 				}
 				rf.mu.Unlock()
 
@@ -318,20 +354,40 @@ func (rf *Raft) appendEntries() {
 				}
 				if reply.Success {
 					// TODO: success
+					rf.log(fmt.Sprintf("Send log to %d succeed", i))
 					rf.mu.Lock()
 					rf.nextIndex[i] = args.CommitIndex + 1
 					rf.mu.Unlock()
+					receivedCh <- struct{}{}
 					return
 				} else if reply.Term > rf.currentTerm {
 					// TODO
+					rf.log("CurrentTerm is behind")
 					return
 				} else {
 					rf.mu.Lock()
+					rf.log("Retry sending log")
 					rf.nextIndex[i] -= 1
 					rf.mu.Unlock()
 				}
 			}
 		}(i)
+	}
+	go func() {
+		for i := 0; i < rf.majorityNum - 1; i++ {
+			<-receivedCh
+		}
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-done:
+		rf.mu.Lock()
+		if rf.applyIndex < commitIndex {
+			rf.applyIndex = commitIndex
+			rf.apply(rf.applyIndex)
+		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -516,7 +572,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.log("start")
+	rf.log(fmt.Sprintf("start %v", command))
 
 	if rf.currentState != leaderState {
 		return rf.commitIndex, rf.currentTerm, false
@@ -526,7 +582,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, &LogEntry{rf.currentTerm, rf.commitIndex, command})
 	rf.commitIndex += 1
 
-	go rf.appendEntries()
+	go rf.appendEntries(rf.commitIndex)
 
 	// TODO: update state
 
@@ -608,9 +664,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.killChan = make(chan struct{}, 2)
 
 	// 2b
-	rf.commitIndex = 0
+	rf.commitIndex = -1
 	rf.logs = make([]*LogEntry, 0)
 	rf.nextIndex = make([]int, rf.totalNum)
+	for i, _ := range(rf.nextIndex) {
+		rf.nextIndex[i] = rf.commitIndex + 1
+	}
+	rf.applyCh = applyCh
+	rf.applyIndex = -1
 
 
 	// heartbeats
