@@ -204,6 +204,10 @@ func (rf *Raft) apply(applyIndex int)  {
 	}
 	rf.log(fmt.Sprintf("Apply: %d", applyIndex))
 
+	if applyIndex > rf.applyIndex {
+		rf.applyIndex = applyIndex
+	}
+
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -238,7 +242,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			for i := rf.applyIndex + 1; i <= args.ApplyIndex; i++ {
 				rf.apply(i)
 			}
-			rf.applyIndex = args.ApplyIndex
 		}
 		rf.log("follower: received heartbeats")
 		return
