@@ -196,13 +196,16 @@ func (rf *Raft) apply(applyIndex int)  {
 	if applyIndex >= len(rf.logs) {
 		return
 	}
-	rf.applyCh <- ApplyMsg{
-		true,
-		rf.logs[applyIndex].Command,
-		// FIXME: +1 to meet the test index requirement
-		applyIndex + 1,
+
+	for i := rf.applyIndex + 1; i <= applyIndex; i++ {
+		rf.applyCh <- ApplyMsg{
+			true,
+			rf.logs[i].Command,
+			// FIXME: +1 to meet the test index requirement
+			i + 1,
+		}
+		rf.log(fmt.Sprintf("Apply: %d", i))
 	}
-	rf.log(fmt.Sprintf("Apply: %d", applyIndex))
 
 	if applyIndex > rf.applyIndex {
 		rf.applyIndex = applyIndex
@@ -238,11 +241,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// heartbeat
 	if len(args.Entries) == 0 {
 		reply.Success = true
-		if rf.applyIndex < args.ApplyIndex {
-			for i := rf.applyIndex + 1; i <= args.ApplyIndex; i++ {
-				rf.apply(i)
-			}
-		}
+		rf.apply(args.ApplyIndex)
 		rf.log("follower: received heartbeats")
 		return
 	}
@@ -339,10 +338,12 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				}
 				prevIndex := rf.nextIndex[i] - 1
 				term := 0
-				if prevIndex != -1 {
+				// FIXME
+				if prevIndex > -1 && prevIndex < len(rf.logs) {
 					term = rf.logs[prevIndex].Term
 				}
-				rf.log(fmt.Sprintf("Send logs: prevIndex %d, len(logs) %d", prevIndex, len(rf.logs[prevIndex + 1:])))
+				rf.log(fmt.Sprintf("Send logs: prevIndex %d, len(logs) %d",
+					prevIndex, len(rf.logs[prevIndex + 1:])))
 				args := AppendEntriesArgs{
 					rf.currentTerm,
 					rf.me,
@@ -364,6 +365,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 					rf.log(fmt.Sprintf("Send log to %d succeed", i))
 					rf.mu.Lock()
 					rf.nextIndex[i] = args.CommitIndex + 1
+					rf.matchIndex[i] = args.CommitIndex
 					rf.mu.Unlock()
 					receivedCh <- struct{}{}
 					return
@@ -374,7 +376,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				} else {
 					rf.mu.Lock()
 					rf.log("Retry sending log")
-					rf.nextIndex[i] -= 1
+					rf.nextIndex[i] = args.PrevLogIndex - 1
 					rf.mu.Unlock()
 				}
 			}
@@ -391,8 +393,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 	case <-done:
 		rf.mu.Lock()
 		if rf.applyIndex < commitIndex {
-			rf.applyIndex = commitIndex
-			rf.apply(rf.applyIndex)
+			rf.apply(commitIndex)
 		}
 		rf.mu.Unlock()
 	}
@@ -675,8 +676,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = -1
 	rf.logs = make([]*LogEntry, 0)
 	rf.nextIndex = make([]int, rf.totalNum)
+	rf.matchIndex = make([]int, rf.totalNum)
 	for i, _ := range(rf.nextIndex) {
 		rf.nextIndex[i] = rf.commitIndex + 1
+		rf.matchIndex[i] = 0
 	}
 	rf.applyCh = applyCh
 	rf.applyIndex = -1
