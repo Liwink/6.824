@@ -469,13 +469,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm
 
+	lastLogTerm := -1
+	if len(rf.logs) > 0 {
+		lastLogTerm = rf.logs[len(rf.logs) - 1].Term
+	}
+
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		args.Term >= rf.currentTerm && args.LastLogIndex >= rf.commitIndex {
+		((args.LastLogTerm > lastLogTerm) || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= rf.commitIndex)) {
 		rf.votedFor = args.CandidateId
 		rf.log("follow: vote for " + strconv.Itoa(args.CandidateId))
 		reply.VoteGranted = true
 	} else {
 		rf.log("refuse to vote for" + strconv.Itoa(args.CandidateId))
+		rf.log(fmt.Sprintf("args.LastLogIndex %d; rf.commitIndex %d", args.LastLogIndex, rf.commitIndex))
 		reply.VoteGranted = false
 	}
 	rf.mu.Unlock()
@@ -523,11 +529,19 @@ func (rf *Raft) sendRequestVotes() {
 	rf.log("term increase after")
 	rf.votedFor = rf.me
 
+	lastLogIndex := 0
+	lastLogTerm := 0
+	if len(rf.logs) > 0 {
+		// fixme: since the logs index started from -1 now
+		lastLogIndex = rf.logs[len(rf.logs) - 1].Index + 1
+		lastLogTerm = rf.logs[len(rf.logs) - 1].Term
+	}
+
 	args := RequestVoteArgs{
 		rf.currentTerm,
 		rf.me,
-		0,
-		0,
+		lastLogIndex,
+		lastLogTerm,
 	}
 	rf.mu.Unlock()
 
@@ -628,6 +642,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	// Your code here (2B).
+	// fixme: index start from -1 -> 0?
 	rf.logs = append(rf.logs, &LogEntry{rf.currentTerm, rf.commitIndex, command})
 	rf.commitIndex += 1
 
