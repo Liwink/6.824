@@ -246,12 +246,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	if args.PrevLogIndex == -1 {
-		rf.logs = args.Entries
-		rf.commitIndex = args.CommitIndex
-		reply.Success = true
-	} else if args.PrevLogIndex < len(rf.logs) && rf.logs[args.PrevLogIndex].Term == args.Term {
-		rf.logs = append(rf.logs[:args.PrevLogIndex + 1], args.Entries...)
+	if (args.PrevLogIndex == -1 ) || (args.PrevLogIndex < len(rf.logs) && rf.logs[args.PrevLogIndex].Term == args.Term) {
+		// do not overwrite the entries beyond args.CommitIndex
+		var index int
+		for i, entry := range args.Entries {
+			index = args.PrevLogIndex + i + 1
+			if index < len(rf.logs) {
+				rf.logs[index] = entry
+			} else {
+				rf.logs = append(rf.logs, entry)
+			}
+		}
 		rf.commitIndex = args.CommitIndex
 		reply.Success = true
 	}
@@ -322,17 +327,22 @@ func (rf *Raft) sendHeartbeats() {
 func (rf *Raft) appendEntries(commitIndex int) {
 	// TODO: stop it when changing leader...?
 
+	var wg sync.WaitGroup
 
 	receivedCh := make(chan struct{}, rf.totalNum)
 	done := make(chan struct{}, 1)
+	timeoutCh := make(chan struct{}, 1)
+	finishCh := make(chan struct{}, 1)
 
 	for i := 0; i < rf.totalNum; i++ {
 		//
 		if i == rf.me {
 			continue
 		}
+		wg.Add(1)
 		go func(i int) {
 			// TODO: to ensure only one goroutine is working for one specific follower
+			defer wg.Done()
 			for {
 				rf.mu.Lock()
 				if rf.nextIndex[i] > commitIndex {
@@ -369,7 +379,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 					rf.log(fmt.Sprintf("Send log to %d succeed", i))
 					rf.mu.Lock()
 					rf.nextIndex[i] = args.CommitIndex + 1
-					rf.matchIndex[i] = args.CommitIndex
+					rf.matchIndex[i] = max(args.CommitIndex, rf.matchIndex[i])
 					rf.mu.Unlock()
 					receivedCh <- struct{}{}
 					return
@@ -389,6 +399,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 			}
 		}(i)
 	}
+
 	go func() {
 		for i := 0; i < rf.majorityNum - 1; i++ {
 			<-receivedCh
@@ -396,14 +407,37 @@ func (rf *Raft) appendEntries(commitIndex int) {
 		done <- struct{}{}
 	}()
 
-	select {
-	case <-done:
-		rf.mu.Lock()
-		if rf.applyIndex < commitIndex {
-			rf.apply(commitIndex)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		timeoutCh <- struct{}{}
+	}()
+
+	go func() {
+		wg.Wait()
+		finishCh <- struct {}{}
+	}()
+
+	for {
+		select {
+		case <-done:
+			rf.mu.Lock()
+			if rf.applyIndex < commitIndex {
+				rf.apply(commitIndex)
+			}
+			rf.mu.Unlock()
+		case <-timeoutCh:
+			rf.mu.Lock()
+			rf.log("leader: wait for appendEntities, timeout")
+			rf.mu.Unlock()
+			return
+		case <- finishCh:
+			rf.mu.Lock()
+			rf.log("leader: all nodes finished appendEntities")
+			rf.mu.Unlock()
+			return
 		}
-		rf.mu.Unlock()
 	}
+
 }
 
 func (rf *Raft) updateTerm(term int) {
@@ -725,4 +759,11 @@ func min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func max(a int, b int) int {
+	if a < b {
+		return b
+	}
+	return a
 }
