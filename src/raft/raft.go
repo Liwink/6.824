@@ -265,15 +265,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 func (rf *Raft) sendHeartbeats() {
 	rf.mu.Lock()
-	args := AppendEntriesArgs{
-		rf.currentTerm,
-		rf.me,
-		0,
-		0,
-		nil,
-		rf.commitIndex,
-		rf.applyIndex,
-	}
+	currentTerm := rf.currentTerm
+	commitIndex := rf.commitIndex
+	applyIndex := rf.applyIndex
 	rf.mu.Unlock()
 
 	timeoutChan := make(chan struct{}, 1)
@@ -284,6 +278,15 @@ func (rf *Raft) sendHeartbeats() {
 			continue
 		}
 		go func(i int) {
+			args := AppendEntriesArgs{
+				currentTerm,
+				rf.me,
+				0,
+				0,
+				nil,
+				commitIndex,
+				min(applyIndex, rf.matchIndex[i]),
+			}
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(i, &args, &reply)
 			if ok && reply.Success == true {
@@ -334,6 +337,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				rf.mu.Lock()
 				if rf.nextIndex[i] > commitIndex {
 					receivedCh <- struct{}{}
+					rf.mu.Unlock()
 					return
 				}
 				prevIndex := rf.nextIndex[i] - 1
@@ -342,8 +346,8 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				if prevIndex > -1 && prevIndex < len(rf.logs) {
 					term = rf.logs[prevIndex].Term
 				}
-				rf.log(fmt.Sprintf("Send logs: prevIndex %d, len(logs) %d",
-					prevIndex, len(rf.logs[prevIndex + 1:])))
+				rf.log(fmt.Sprintf("Send logs: prevIndex %d, len(logs).. ",
+					prevIndex))
 				args := AppendEntriesArgs{
 					rf.currentTerm,
 					rf.me,
@@ -377,6 +381,9 @@ func (rf *Raft) appendEntries(commitIndex int) {
 					rf.mu.Lock()
 					rf.log("Retry sending log")
 					rf.nextIndex[i] = args.PrevLogIndex - 1
+					if rf.nextIndex[i] < 0 {
+						rf.nextIndex[i] = 0
+					}
 					rf.mu.Unlock()
 				}
 			}
@@ -679,7 +686,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, rf.totalNum)
 	for i, _ := range(rf.nextIndex) {
 		rf.nextIndex[i] = rf.commitIndex + 1
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = rf.commitIndex
 	}
 	rf.applyCh = applyCh
 	rf.applyIndex = -1
@@ -711,4 +718,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 	return rf
+}
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
