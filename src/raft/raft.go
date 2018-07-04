@@ -24,12 +24,18 @@ import (
 	"math/rand"
 	"strconv"
 	"fmt"
+	"bytes"
+	"labgob"
 )
 
 // import "bytes"
 // import "labgob"
 
-
+type PersistData struct {
+	CurrentTerm int
+	VotedFor 	int
+	Logs		[]*LogEntry
+}
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -113,12 +119,18 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	rf.log(fmt.Sprintf("persist persister\n"))
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	vars := PersistData{
+		VotedFor: rf.votedFor,
+		CurrentTerm: rf.currentTerm,
+		Logs: rf.logs,
+	}
+	e.Encode(&vars)
+	rf.log(fmt.Sprintf("persist: currentTerm: %d; votedFor: %d; len(rf.logs): %d", rf.currentTerm, rf.votedFor, len(rf.logs)))
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 
@@ -126,22 +138,24 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	rf.log(fmt.Sprintf("readPersist persister\n"))
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var vars PersistData
+	if d.Decode(&vars) != nil {
+		panic("readPersist")
+	} else {
+		rf.currentTerm = vars.CurrentTerm
+		rf.votedFor = vars.VotedFor
+		rf.logs = vars.Logs
+	}
+	rf.log(fmt.Sprintf("readPersist: currentTerm: %d; votedFor: %d; len(rf.logs): %d", rf.currentTerm, rf.votedFor, len(rf.logs)))
+	rf.commitIndex = len(rf.logs) - 1
 }
 
 
@@ -260,6 +274,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = args.CommitIndex
 		reply.Success = true
 	}
+	rf.persist()
 	rf.log(fmt.Sprintf("AppendEntries: len(logs) %d", len(rf.logs)))
 }
 
@@ -321,6 +336,15 @@ func (rf *Raft) sendHeartbeats() {
 		rf.mu.Lock()
 		rf.log("leader: did not get majority responses, timeout")
 		rf.mu.Unlock()
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for _, i := range rf.matchIndex {
+		if i < rf.commitIndex {
+			go rf.appendEntries(rf.commitIndex)
+			return
+		}
 	}
 }
 
@@ -484,6 +508,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.log(fmt.Sprintf("args.LastLogIndex %d; rf.commitIndex %d", args.LastLogIndex, rf.commitIndex))
 		reply.VoteGranted = false
 	}
+
+	rf.persist()
 	rf.mu.Unlock()
 }
 
@@ -650,6 +676,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// TODO: update state
 
+	rf.persist()
+
 	// FIXME: +1 to meet the test index requirement
 	return rf.commitIndex + 1, rf.currentTerm, rf.currentState == leaderState
 }
@@ -667,6 +695,7 @@ func (rf *Raft) Kill() {
 	rf.killChan <- struct{}{}
 	rf.killChan <- struct{}{}
 	rf.mu.Unlock()
+	rf.persist()
 }
 
 func (rf *Raft) electionDaemon() {
@@ -685,6 +714,7 @@ func (rf *Raft) electionDaemon() {
 		} else {
 			rf.log("candidate: start election")
 			rf.currentState = candidateState
+			rf.persist()
 			go rf.sendRequestVotes()
 		}
 		rf.mu.Unlock()
@@ -731,6 +761,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// 2b
 	rf.commitIndex = -1
 	rf.logs = make([]*LogEntry, 0)
+
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
 	rf.nextIndex = make([]int, rf.totalNum)
 	rf.matchIndex = make([]int, rf.totalNum)
 	for i, _ := range(rf.nextIndex) {
@@ -762,8 +796,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// selection
 	go rf.electionDaemon()
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 
 	return rf
