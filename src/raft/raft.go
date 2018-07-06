@@ -97,7 +97,7 @@ type Raft struct {
 }
 
 func (rf *Raft)log(str string)  {
-	fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
+	//fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
 }
 
 // return currentTerm and whether this server
@@ -122,10 +122,14 @@ func (rf *Raft) persist() {
 	rf.log(fmt.Sprintf("persist persister"))
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
+	logs := rf.logs
+	if rf.commitIndex > -1 {
+		logs = rf.logs[:rf.commitIndex + 1]
+	}
 	vars := PersistData{
 		VotedFor: rf.votedFor,
 		CurrentTerm: rf.currentTerm,
-		Logs: rf.logs,
+		Logs: logs,
 	}
 	e.Encode(&vars)
 	rf.log(fmt.Sprintf("persist: currentTerm: %d; votedFor: %d; len(rf.logs): %d", rf.currentTerm, rf.votedFor, len(rf.logs)))
@@ -221,9 +225,13 @@ func (rf *Raft) apply(applyIndex int)  {
 		rf.log(fmt.Sprintf("Apply: %d", i))
 	}
 
+	if applyIndex > rf.commitIndex {
+		rf.commitIndex = applyIndex
+	}
 	if applyIndex > rf.applyIndex {
 		rf.applyIndex = applyIndex
 	}
+	rf.persist()
 
 }
 
@@ -271,10 +279,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.logs = append(rf.logs, entry)
 			}
 		}
-		rf.commitIndex = args.CommitIndex
+		//rf.commitIndex = args.CommitIndex
 		reply.Success = true
 	}
-	rf.persist()
+	//rf.persist()
 	rf.log(fmt.Sprintf("AppendEntries: len(logs) %d", len(rf.logs)))
 }
 
@@ -439,6 +447,9 @@ func (rf *Raft) appendEntries(commitIndex int) {
 		select {
 		case <-done:
 			rf.mu.Lock()
+			if rf.commitIndex < commitIndex {
+				rf.commitIndex = commitIndex
+			}
 			if rf.applyIndex < commitIndex {
 				rf.apply(commitIndex)
 			}
@@ -488,8 +499,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 
 	lastLogTerm := -1
-	if len(rf.logs) > 0 {
-		lastLogTerm = rf.logs[len(rf.logs) - 1].Term
+	if rf.commitIndex >= 0 {
+		lastLogTerm = rf.logs[rf.commitIndex].Term
 	}
 
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
@@ -549,12 +560,12 @@ func (rf *Raft) sendRequestVotes() {
 	rf.log("term increase after")
 	rf.votedFor = rf.me
 
-	lastLogIndex := 0
+	lastLogIndex := rf.commitIndex
 	lastLogTerm := 0
-	if len(rf.logs) > 0 {
+	if rf.commitIndex >= 0 {
 		// fixme: since the logs index started from -1 now
-		lastLogIndex = rf.logs[len(rf.logs) - 1].Index + 1
-		lastLogTerm = rf.logs[len(rf.logs) - 1].Term
+		//lastLogIndex = rf.logs[rf.commitIndex].Index
+		lastLogTerm = rf.logs[rf.commitIndex].Term
 	}
 
 	args := RequestVoteArgs{
@@ -619,7 +630,7 @@ func (rf *Raft) sendRequestVotes() {
 		rf.mu.Lock()
 		rf.currentState = leaderState
 		rf.isLeaderAlive = true
-		for i, _ := range rf.nextIndex {
+		for i := range rf.nextIndex {
 			rf.nextIndex[i] = rf.commitIndex + 1
 		}
 		rf.log("candidate: selected as a leader")
@@ -658,22 +669,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log(fmt.Sprintf("start %v", command))
 
 	if rf.currentState != leaderState {
-		return rf.commitIndex, rf.currentTerm, false
+		return len(rf.logs), rf.currentTerm, false
 	}
 
 	// Your code here (2B).
 	// fixme: index start from -1 -> 0?
-	rf.logs = append(rf.logs, &LogEntry{rf.currentTerm, rf.commitIndex, command})
-	rf.commitIndex += 1
+	rf.logs = append(rf.logs, &LogEntry{rf.currentTerm, len(rf.logs) - 1, command})
+	//rf.commitIndex += 1
 
-	go rf.appendEntries(rf.commitIndex)
+	go rf.appendEntries(len(rf.logs) - 1)
 
 	// TODO: update state
 
 	rf.persist()
 
 	// FIXME: +1 to meet the test index requirement
-	return rf.commitIndex + 1, rf.currentTerm, rf.currentState == leaderState
+	return len(rf.logs), rf.currentTerm, rf.currentState == leaderState
 }
 
 //
