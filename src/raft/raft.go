@@ -119,7 +119,7 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	rf.log(fmt.Sprintf("persist persister\n"))
+	rf.log(fmt.Sprintf("persist persister"))
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	vars := PersistData{
@@ -138,7 +138,7 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	rf.log(fmt.Sprintf("readPersist persister\n"))
+	rf.log(fmt.Sprintf("readPersist persister"))
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -351,8 +351,6 @@ func (rf *Raft) sendHeartbeats() {
 func (rf *Raft) appendEntries(commitIndex int) {
 	// TODO: stop it when changing leader...?
 
-	var wg sync.WaitGroup
-
 	receivedCh := make(chan struct{}, rf.totalNum)
 	done := make(chan struct{}, 1)
 	timeoutCh := make(chan struct{}, 1)
@@ -363,10 +361,8 @@ func (rf *Raft) appendEntries(commitIndex int) {
 		if i == rf.me {
 			continue
 		}
-		wg.Add(1)
 		go func(i int) {
 			// TODO: to ensure only one goroutine is working for one specific follower
-			defer wg.Done()
 			for {
 				rf.mu.Lock()
 				if rf.nextIndex[i] > commitIndex {
@@ -425,20 +421,18 @@ func (rf *Raft) appendEntries(commitIndex int) {
 	}
 
 	go func() {
-		for i := 0; i < rf.majorityNum - 1; i++ {
+		for i := 0; i < rf.totalNum - 1; i++ {
 			<-receivedCh
+			if i == rf.majorityNum - 2 {
+				done <- struct{}{}
+			}
 		}
-		done <- struct{}{}
+		finishCh <- struct {}{}
 	}()
 
 	go func() {
 		time.Sleep(150 * time.Millisecond)
 		timeoutCh <- struct{}{}
-	}()
-
-	go func() {
-		wg.Wait()
-		finishCh <- struct {}{}
 	}()
 
 	for {
