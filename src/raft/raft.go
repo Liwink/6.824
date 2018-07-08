@@ -97,7 +97,15 @@ type Raft struct {
 }
 
 func (rf *Raft)log(str string)  {
-	//fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
+	fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
+}
+
+func (rf *Raft)log_entries()  {
+	fmt.Println(rf.me, rf.currentTerm, rf.currentState, rf.name)
+	for _, e := range rf.logs {
+		fmt.Printf("%d-(%d)-%d; ", e.Index, e.Term, e.Command)
+	}
+	fmt.Print("\n")
 }
 
 // return currentTerm and whether this server
@@ -123,9 +131,9 @@ func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	logs := rf.logs
-	if rf.commitIndex > -1 {
-		logs = rf.logs[:rf.commitIndex + 1]
-	}
+	//if rf.commitIndex > -1 {
+		//logs = rf.logs[:rf.commitIndex + 1]
+	//}
 	vars := PersistData{
 		VotedFor: rf.votedFor,
 		CurrentTerm: rf.currentTerm,
@@ -281,6 +289,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		//rf.commitIndex = args.CommitIndex
 		reply.Success = true
+		rf.log_entries()
 	}
 	//rf.persist()
 	rf.log(fmt.Sprintf("AppendEntries: len(logs) %d", len(rf.logs)))
@@ -323,7 +332,7 @@ func (rf *Raft) sendHeartbeats() {
 		}(i)
 	}
 	go func() {
-		for i := 0; i < rf.majorityNum - 1; i++ {
+		for i := 0; i < rf.majorityNum-1; i++ {
 			<-aliveChan
 		}
 		done <- struct{}{}
@@ -450,7 +459,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 			if rf.commitIndex < commitIndex {
 				rf.commitIndex = commitIndex
 			}
-			if rf.applyIndex < commitIndex {
+			if rf.applyIndex < commitIndex && rf.logs[rf.commitIndex].Term == rf.currentTerm {
 				rf.apply(commitIndex)
 			}
 			rf.mu.Unlock()
@@ -498,13 +507,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm
 
-	lastLogTerm := -1
-	if rf.commitIndex >= 0 {
-		lastLogTerm = rf.logs[rf.commitIndex].Term
+	lastLogTerm := 0
+	lastLogIndex := -1
+	if len(rf.logs) > 0 {
+		lastLogTerm = rf.logs[len(rf.logs) - 1].Term
+		lastLogIndex = rf.logs[len(rf.logs) - 1].Index
 	}
 
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		((args.LastLogTerm > lastLogTerm) || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= rf.commitIndex)) {
+		((args.LastLogTerm > lastLogTerm) || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)) {
 		rf.votedFor = args.CandidateId
 		rf.log("follow: vote for " + strconv.Itoa(args.CandidateId))
 		reply.VoteGranted = true
@@ -560,12 +571,12 @@ func (rf *Raft) sendRequestVotes() {
 	rf.log("term increase after")
 	rf.votedFor = rf.me
 
-	lastLogIndex := rf.commitIndex
+	lastLogIndex := -1
 	lastLogTerm := 0
-	if rf.commitIndex >= 0 {
+	if len(rf.logs) > 0 {
 		// fixme: since the logs index started from -1 now
-		//lastLogIndex = rf.logs[rf.commitIndex].Index
-		lastLogTerm = rf.logs[rf.commitIndex].Term
+		lastLogIndex = rf.logs[len(rf.logs) - 1].Index
+		lastLogTerm = rf.logs[len(rf.logs) - 1].Term
 	}
 
 	args := RequestVoteArgs{
@@ -634,6 +645,7 @@ func (rf *Raft) sendRequestVotes() {
 			rf.nextIndex[i] = rf.commitIndex + 1
 		}
 		rf.log("candidate: selected as a leader")
+		rf.log_entries()
 		rf.mu.Unlock()
 
 		go rf.sendHeartbeats()
@@ -666,7 +678,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.log(fmt.Sprintf("start %v", command))
+	if rf.currentState == leaderState {
+		rf.log(fmt.Sprintf("start %v", command))
+	}
 
 	if rf.currentState != leaderState {
 		return len(rf.logs), rf.currentTerm, false
@@ -675,6 +689,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	// fixme: index start from -1 -> 0?
 	rf.logs = append(rf.logs, &LogEntry{rf.currentTerm, len(rf.logs) - 1, command})
+	rf.log_entries()
 	//rf.commitIndex += 1
 
 	go rf.appendEntries(len(rf.logs) - 1)
@@ -772,9 +787,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.nextIndex = make([]int, rf.totalNum)
 	rf.matchIndex = make([]int, rf.totalNum)
-	for i, _ := range(rf.nextIndex) {
+	for i := range(rf.nextIndex) {
 		rf.nextIndex[i] = rf.commitIndex + 1
-		rf.matchIndex[i] = rf.commitIndex
+		rf.matchIndex[i] = -1
 	}
 	rf.applyCh = applyCh
 	rf.applyIndex = -1
