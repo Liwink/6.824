@@ -94,13 +94,15 @@ type Raft struct {
 	applyCh chan ApplyMsg
 	applyIndex int
 
+	isSendingLog bool
+
 }
 
 func (rf *Raft)log(str string)  {
 	fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
 }
 
-func (rf *Raft)log_entries()  {
+func (rf *Raft) logEntries()  {
 	fmt.Println(rf.me, rf.currentTerm, rf.currentState, rf.name)
 	for _, e := range rf.logs {
 		fmt.Printf("%d-(%d)-%d; ", e.Index, e.Term, e.Command)
@@ -216,6 +218,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+	PrevLogTerm int
+	PrevLogIndex int
 }
 
 func (rf *Raft) apply(applyIndex int)  {
@@ -230,7 +234,7 @@ func (rf *Raft) apply(applyIndex int)  {
 			// FIXME: +1 to meet the test index requirement
 			i + 1,
 		}
-		rf.log(fmt.Sprintf("Apply: %d", i))
+		rf.log(fmt.Sprintf("Apply: %d, %d", i, rf.logs[i].Command))
 	}
 
 	if applyIndex > rf.commitIndex {
@@ -255,6 +259,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else {
 		rf.updateTerm(args.Term)
+		rf.votedFor = args.LeaderId
 		reply.Term = rf.currentTerm
 	}
 
@@ -277,7 +282,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if (args.PrevLogIndex == -1 ) || (args.PrevLogIndex < len(rf.logs) && rf.logs[args.PrevLogIndex].Term == args.Term) {
-		// do not overwrite the entries beyond args.CommitIndex
+		// for concurrent commit, the order is not guaranteed.
+		// commitIndex 3 may arrival behind commitIndex 5
+		// so do not overwrite the entries beyond args.CommitIndex
 		var index int
 		for i, entry := range args.Entries {
 			index = args.PrevLogIndex + i + 1
@@ -289,7 +296,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		//rf.commitIndex = args.CommitIndex
 		reply.Success = true
-		rf.log_entries()
+		rf.logEntries()
+	} else {
+		if len(rf.logs) == 0 {
+			reply.PrevLogTerm = -1
+		} else if args.PrevLogIndex < len(rf.logs) {
+			reply.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		} else {
+			reply.PrevLogTerm = rf.logs[len(rf.logs) - 1].Term
+		}
+		reply.PrevLogIndex = min(args.PrevLogIndex, len(rf.logs))
 	}
 	//rf.persist()
 	rf.log(fmt.Sprintf("AppendEntries: len(logs) %d", len(rf.logs)))
@@ -357,16 +373,37 @@ func (rf *Raft) sendHeartbeats() {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	for _, i := range rf.matchIndex {
-		if i < rf.commitIndex {
-			go rf.appendEntries(rf.commitIndex)
+	if rf.isSendingLog {
+		return
+	}
+	for index, i := range rf.matchIndex {
+		if index == rf.me {
+			continue
+		}
+		if i < len(rf.logs) - 1 {
+			go rf.appendEntries(len(rf.logs) - 1)
 			return
 		}
 	}
+	//go rf.appendEntries(len(rf.logs) - 1)
+	//go rf.appendEntries(rf.commitIndex)
 }
 
 func (rf *Raft) appendEntries(commitIndex int) {
 	// TODO: stop it when changing leader...?
+	rf.mu.Lock()
+	rf.isSendingLog = true
+	rf.mu.Unlock()
+
+	defer func() {
+		rf.mu.Lock()
+		rf.isSendingLog = false
+		rf.mu.Unlock()
+	}()
+
+	rf.log(fmt.Sprintf("appendEntries: %d", commitIndex))
+	rf.log(fmt.Sprintf("nextIndex: %v", rf.nextIndex))
+	rf.log(fmt.Sprintf("matchIndex: %v", rf.matchIndex))
 
 	receivedCh := make(chan struct{}, rf.totalNum)
 	done := make(chan struct{}, 1)
@@ -413,9 +450,10 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				}
 				if reply.Success {
 					// TODO: success
-					rf.log(fmt.Sprintf("Send log to %d succeed", i))
+					rf.log(fmt.Sprintf("Send log %d to %d succeed", commitIndex, i))
 					rf.mu.Lock()
-					rf.nextIndex[i] = args.CommitIndex + 1
+					// nextIndex fail -> decrease; success -> increase
+					rf.nextIndex[i] = max(args.CommitIndex + 1, rf.nextIndex[i])
 					rf.matchIndex[i] = max(args.CommitIndex, rf.matchIndex[i])
 					rf.mu.Unlock()
 					receivedCh <- struct{}{}
@@ -426,8 +464,21 @@ func (rf *Raft) appendEntries(commitIndex int) {
 					return
 				} else {
 					rf.mu.Lock()
+					if rf.currentState != leaderState {
+						rf.log("Stop retrying sending log")
+						rf.mu.Unlock()
+						return
+					}
 					rf.log("Retry sending log")
-					rf.nextIndex[i] = args.PrevLogIndex - 1
+					//rf.nextIndex[i] = args.PrevLogIndex - 1
+					//rf.nextIndex[i] = reply.PrevLogIndex - 1
+					rf.nextIndex[i] = 0
+					for j := reply.PrevLogIndex - 1; j > 0; j-- {
+						if rf.logs[j].Term <= reply.PrevLogTerm {
+							rf.nextIndex[i] = j
+							break
+						}
+					}
 					if rf.nextIndex[i] < 0 {
 						rf.nextIndex[i] = 0
 					}
@@ -456,16 +507,17 @@ func (rf *Raft) appendEntries(commitIndex int) {
 		select {
 		case <-done:
 			rf.mu.Lock()
+			rf.log(fmt.Sprintf("commitIndex done %d", rf.commitIndex))
 			if rf.commitIndex < commitIndex {
 				rf.commitIndex = commitIndex
 			}
-			if rf.applyIndex < commitIndex && rf.logs[rf.commitIndex].Term == rf.currentTerm {
+			if rf.applyIndex < commitIndex && rf.logs[rf.commitIndex].Term >= rf.currentTerm {
 				rf.apply(commitIndex)
 			}
 			rf.mu.Unlock()
 		case <-timeoutCh:
 			rf.mu.Lock()
-			rf.log("leader: wait for appendEntities, timeout")
+			rf.log(fmt.Sprintf("leader: wait for appendEntities %d, timeout", commitIndex))
 			rf.mu.Unlock()
 			return
 		case <- finishCh:
@@ -519,6 +571,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		rf.log("follow: vote for " + strconv.Itoa(args.CandidateId))
 		reply.VoteGranted = true
+		rf.isLeaderAlive = true
 	} else {
 		rf.log("refuse to vote for" + strconv.Itoa(args.CandidateId))
 		rf.log(fmt.Sprintf("args.LastLogIndex %d; rf.commitIndex %d", args.LastLogIndex, rf.commitIndex))
@@ -645,7 +698,7 @@ func (rf *Raft) sendRequestVotes() {
 			rf.nextIndex[i] = rf.commitIndex + 1
 		}
 		rf.log("candidate: selected as a leader")
-		rf.log_entries()
+		rf.logEntries()
 		rf.mu.Unlock()
 
 		go rf.sendHeartbeats()
@@ -689,7 +742,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	// fixme: index start from -1 -> 0?
 	rf.logs = append(rf.logs, &LogEntry{rf.currentTerm, len(rf.logs) - 1, command})
-	rf.log_entries()
+	rf.logEntries()
 	//rf.commitIndex += 1
 
 	go rf.appendEntries(len(rf.logs) - 1)
@@ -720,7 +773,7 @@ func (rf *Raft) Kill() {
 
 func (rf *Raft) electionDaemon() {
 	for {
-		time.Sleep(time.Duration(350 + rand.Intn(300)) * time.Millisecond)
+		time.Sleep(time.Duration(550 + rand.Intn(300)) * time.Millisecond)
 
 		select {
 		case <- rf.killChan:
@@ -781,6 +834,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// 2b
 	rf.commitIndex = -1
 	rf.logs = make([]*LogEntry, 0)
+
+	rf.isSendingLog = false
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
