@@ -95,6 +95,7 @@ type Raft struct {
 	applyIndex int
 
 	isSendingLog bool
+	heartbeatIndex int
 
 }
 
@@ -213,6 +214,7 @@ type AppendEntriesArgs struct {
 	Entries []*LogEntry
 	CommitIndex int
 	ApplyIndex int
+	HeartbeatIndex int
 }
 
 type AppendEntriesReply struct {
@@ -276,8 +278,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// heartbeat
 	if len(args.Entries) == 0 {
 		reply.Success = true
-		rf.apply(args.ApplyIndex)
-		rf.log("follower: received heartbeats")
+		go rf.apply(args.ApplyIndex)
+		rf.log(fmt.Sprintf("follower: received heartbeats %d", args.HeartbeatIndex))
 		return
 	}
 
@@ -326,6 +328,8 @@ func (rf *Raft) sendHeartbeats() {
 	currentTerm := rf.currentTerm
 	commitIndex := rf.commitIndex
 	applyIndex := rf.applyIndex
+	rf.heartbeatIndex += 1
+	heartbeatIndex := rf.heartbeatIndex
 	rf.mu.Unlock()
 
 	timeoutChan := make(chan struct{}, 1)
@@ -344,9 +348,11 @@ func (rf *Raft) sendHeartbeats() {
 				nil,
 				commitIndex,
 				min(applyIndex, rf.matchIndex[i]),
+				heartbeatIndex,
 			}
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(i, &args, &reply)
+			rf.log(fmt.Sprintf("received %d response from %d: %v, %v", heartbeatIndex, i, ok, reply.Success))
 			if ok && reply.Success == true {
 				aliveChan <- struct{}{}
 			}
@@ -367,12 +373,12 @@ func (rf *Raft) sendHeartbeats() {
 	select {
 	case <-done:
 		rf.mu.Lock()
-		rf.log("leader: received responses")
+		rf.log(fmt.Sprintf("received majority responses %d", heartbeatIndex))
 		rf.isLeaderAlive = true
 		rf.mu.Unlock()
 	case <-timeoutChan:
 		rf.mu.Lock()
-		rf.log("leader: did not get majority responses, timeout")
+		rf.log(fmt.Sprintf("did not get majority responses, timeout %d", heartbeatIndex))
 		rf.mu.Unlock()
 	}
 
@@ -435,16 +441,17 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				if prevIndex > -1 && prevIndex < len(rf.logs) {
 					term = rf.logs[prevIndex].Term
 				}
-				rf.log(fmt.Sprintf("Send logs: prevIndex %d, len(logs).. ",
-					prevIndex))
+				logs := rf.logs[prevIndex + 1:commitIndex + 1]
+				rf.log(fmt.Sprintf("Send logs: prevIndex %d, commitIndex %d, len(logs) %d", prevIndex, commitIndex, len(logs)))
 				args := AppendEntriesArgs{
 					rf.currentTerm,
 					rf.me,
 					prevIndex,
 					term,
-					rf.logs[prevIndex + 1:commitIndex + 1],
+					logs,
 					commitIndex,
 					rf.applyIndex,
+					rf.heartbeatIndex,
 				}
 				rf.mu.Unlock()
 
@@ -518,7 +525,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				rf.commitIndex = commitIndex
 			}
 			if rf.applyIndex < commitIndex && rf.logs[rf.commitIndex].Term >= rf.currentTerm {
-				rf.apply(commitIndex)
+				go rf.apply(commitIndex)
 			}
 			rf.mu.Unlock()
 		case <-timeoutCh:
@@ -783,6 +790,9 @@ func (rf *Raft) electionDaemon() {
 	for {
 		time.Sleep(time.Duration(550 + rand.Intn(300)) * time.Millisecond)
 
+		// leader should be timeout and start a election as well
+		// to stop receiving client `start` requests
+
 		select {
 		case <- rf.killChan:
 			return
@@ -850,13 +860,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.nextIndex = make([]int, rf.totalNum)
 	rf.matchIndex = make([]int, rf.totalNum)
-	for i := range(rf.nextIndex) {
+	for i := range rf.nextIndex {
 		rf.nextIndex[i] = rf.commitIndex + 1
 		rf.matchIndex[i] = -1
 	}
 	rf.applyCh = applyCh
 	rf.applyIndex = -1
 
+	rf.heartbeatIndex = 0
 
 	// heartbeats
 	go func() {
