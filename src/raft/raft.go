@@ -294,6 +294,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.logs = append(rf.logs, entry)
 			}
 		}
+		// truncate the isolated leader's potential invalid logs
+		if index + 1 < len(rf.logs) && rf.logs[index + 1].Term < rf.logs[index].Term {
+			rf.logs = rf.logs[:index + 1]
+		}
 		//rf.commitIndex = args.CommitIndex
 		reply.Success = true
 		rf.logEntries()
@@ -309,6 +313,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//rf.persist()
 	rf.log(fmt.Sprintf("AppendEntries: len(logs) %d", len(rf.logs)))
+	rf.logEntries()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -355,7 +360,7 @@ func (rf *Raft) sendHeartbeats() {
 	}()
 
 	go func() {
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 		timeoutChan <- struct{}{}
 	}()
 
@@ -508,6 +513,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 		case <-done:
 			rf.mu.Lock()
 			rf.log(fmt.Sprintf("commitIndex done %d", rf.commitIndex))
+			rf.isLeaderAlive = true
 			if rf.commitIndex < commitIndex {
 				rf.commitIndex = commitIndex
 			}
@@ -745,7 +751,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logEntries()
 	//rf.commitIndex += 1
 
-	go rf.appendEntries(len(rf.logs) - 1)
+	if !rf.isSendingLog {
+		go rf.appendEntries(len(rf.logs) - 1)
+	}
 
 	// TODO: update state
 
