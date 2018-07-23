@@ -17,7 +17,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -33,15 +32,56 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	meetIndex int
+	cmdC      map[interface{}]chan interface{}
+	result    map[string]string
 }
 
+func (kv *KVServer) isLeader() bool {
+	_, isLeader := kv.rf.GetState()
+	return isLeader
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	if !kv.isLeader() {
+		reply.WrongLeader = true
+		return
+	}
+	var ok bool
+	reply.WrongLeader = false
+
+	kv.cmdC[args.UniqueId] = make(chan interface{}, 1)
+	kv.rf.Start(args.UniqueId)
+
+	select {
+	case <-kv.cmdC[args.UniqueId]:
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		reply.Value, ok = kv.result[args.Key]
+		if !ok {
+			reply.Err = ErrNoKey
+		}
+	}
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+}
+
+func (kv *KVServer) listenApply() {
+	var ok bool
+	msg := <-kv.applyCh
+	kv.mu.Lock()
+	if msg.CommandValid && msg.CommandIndex > kv.meetIndex {
+		_, ok = kv.cmdC[msg.Command]
+		if ok {
+			kv.cmdC[msg.Command] <- struct{}{}
+		}
+		kv.meetIndex = msg.CommandIndex
+	}
+	kv.mu.Unlock()
 }
 
 //
@@ -79,11 +119,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.meetIndex = -1
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+
+	go kv.listenApply()
 
 	return kv
 }

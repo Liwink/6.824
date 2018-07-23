@@ -2,11 +2,12 @@ package raftkv
 
 import "labrpc"
 import "crypto/rand"
+import mrand "math/rand"
 import "math/big"
 
-
 type Clerk struct {
-	servers []*labrpc.ClientEnd
+	preLeaderId int
+	servers     []*labrpc.ClientEnd
 	// You will have to modify this struct.
 }
 
@@ -20,6 +21,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.preLeaderId = 0
 	// You'll have to add code here.
 	return ck
 }
@@ -37,7 +39,22 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	var reply *GetReply
+	args := &GetArgs{key, nrand()}
+	reply = &GetReply{WrongLeader: true}
 
+	for true {
+		ok := ck.servers[ck.preLeaderId].Call("KVServer.Get", args, reply)
+		if !ok || reply.WrongLeader {
+			ck.preLeaderId = mrand.Intn(len(ck.servers))
+		} else if reply.Err == ErrNoKey {
+			return ""
+		} else if reply.Err == "" {
+			return reply.Value
+		}
+	}
+
+	// todo: timeout?
 	// You will have to modify this function.
 	return ""
 }
