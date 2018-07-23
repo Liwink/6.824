@@ -61,6 +61,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Value, ok = kv.result[args.Key]
 		if !ok {
 			reply.Err = ErrNoKey
+		} else {
+			reply.Err = ""
 		}
 	}
 
@@ -68,6 +70,35 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	if !kv.isLeader() {
+		reply.WrongLeader = true
+		return
+	}
+	reply.WrongLeader = false
+
+	kv.cmdC[args.UniqueId] = make(chan interface{}, 1)
+	kv.rf.Start(args.UniqueId)
+
+	// fixme: timeout?
+	timeoutC := make(chan interface{})
+	//go func() {
+	//	time.Sleep(300 * time.Millisecond)
+	//	timeoutC <- struct {}{}
+	//}()
+
+	select {
+	case <-kv.cmdC[args.UniqueId]:
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		reply.Err = ""
+		if args.Op == "Put" {
+			kv.result[args.Key] = args.Value
+		} else if args.Op == "Append" {
+			kv.result[args.Key] += args.Value
+		}
+	case <-timeoutC:
+		reply.Err = ErrTimeout
+	}
 }
 
 func (kv *KVServer) listenApply() {
