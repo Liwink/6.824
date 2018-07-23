@@ -3,19 +3,13 @@ package raftkv
 import (
 	"labgob"
 	"labrpc"
-	"log"
+	//"log"
 	"raft"
 	"sync"
+	"fmt"
 )
 
 const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 type Op struct {
 	// Your definitions here.
@@ -37,6 +31,15 @@ type KVServer struct {
 	result    map[string]string
 }
 
+func (kv *KVServer) DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		fmt.Printf("[Server %d] ", kv.me)
+		fmt.Printf(format, a...)
+		fmt.Print("\n ")
+	}
+	return
+}
+
 func (kv *KVServer) isLeader() bool {
 	_, isLeader := kv.rf.GetState()
 	return isLeader
@@ -48,6 +51,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.WrongLeader = true
 		return
 	}
+	kv.DPrintf("Get; args: %v", args)
 	var ok bool
 	reply.WrongLeader = false
 
@@ -65,6 +69,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = ""
 		}
 	}
+	kv.DPrintf("Get Done; args: %v; reply: %v", args, reply)
 
 }
 
@@ -72,11 +77,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	if !kv.isLeader() {
 		reply.WrongLeader = true
+		reply.Err = "WrongLeader"
 		return
 	}
+	kv.DPrintf("PutAppend; args: %v", args)
 	reply.WrongLeader = false
 
-	kv.cmdC[args.UniqueId] = make(chan interface{}, 1)
+	ch := make(chan interface{}, 1)
+	kv.cmdC[args.UniqueId] = ch
 	kv.rf.Start(args.UniqueId)
 
 	// fixme: timeout?
@@ -87,7 +95,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	//}()
 
 	select {
-	case <-kv.cmdC[args.UniqueId]:
+	case <-ch:
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
 		reply.Err = ""
@@ -99,20 +107,28 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case <-timeoutC:
 		reply.Err = ErrTimeout
 	}
+	kv.DPrintf("PutAppend Done; args: %v, reply: %v", args, reply)
+	reply.WrongLeader = false
+	return
+
 }
 
 func (kv *KVServer) listenApply() {
 	var ok bool
-	msg := <-kv.applyCh
-	kv.mu.Lock()
-	if msg.CommandValid && msg.CommandIndex > kv.meetIndex {
-		_, ok = kv.cmdC[msg.Command]
-		if ok {
-			kv.cmdC[msg.Command] <- struct{}{}
+	for true {
+		msg := <-kv.applyCh
+		kv.mu.Lock()
+		if msg.CommandValid && msg.CommandIndex > kv.meetIndex {
+			_, ok = kv.cmdC[msg.Command]
+			if ok {
+				go func() {
+					kv.cmdC[msg.Command] <- struct{}{}
+				}()
+			}
+			kv.meetIndex = msg.CommandIndex
 		}
-		kv.meetIndex = msg.CommandIndex
+		kv.mu.Unlock()
 	}
-	kv.mu.Unlock()
 }
 
 //
@@ -151,6 +167,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.meetIndex = -1
+	kv.result = make(map[string]string)
+	kv.cmdC = make(map[interface{}]chan interface{})
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)

@@ -3,7 +3,10 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import mrand "math/rand"
-import "math/big"
+import (
+	"math/big"
+	"fmt"
+)
 
 type Clerk struct {
 	preLeaderId int
@@ -26,6 +29,15 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
+func (ck *Clerk) DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		fmt.Printf("[Clerk] ")
+		fmt.Printf(format, a...)
+		fmt.Print("\n ")
+	}
+	return
+}
+
 //
 // fetch the current value for a key.
 // returns "" if the key does not exist.
@@ -40,15 +52,19 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	args := &GetArgs{key, nrand()}
-	reply := &GetReply{WrongLeader: true}
+
+	ck.DPrintf("Get: %s", key)
 
 	for true {
+		reply := &GetReply{}
 		ok := ck.servers[ck.preLeaderId].Call("KVServer.Get", args, reply)
 		if !ok || reply.WrongLeader {
 			ck.preLeaderId = mrand.Intn(len(ck.servers))
 		} else if reply.Err == ErrNoKey {
+			ck.DPrintf("Get ErrNoKey: %s", key)
 			return ""
 		} else if reply.Err == "" {
+			ck.DPrintf("Get Done: Key: %s; Value: %s", key, reply.Value)
 			return reply.Value
 		}
 	}
@@ -70,15 +86,21 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := &PutAppendArgs{key, value, op, nrand()}
-	reply := &PutAppendReply{WrongLeader: true}
+	args := PutAppendArgs{key, value, op, nrand()}
+
+	ck.DPrintf("PutAppend: Key: %s; Value: %s, Op: %s", key, value, op)
 
 	for true {
-		ok := ck.servers[ck.preLeaderId].Call("KVServer.PutAppend", args, reply)
+		reply := PutAppendReply{}
+		ok := ck.servers[ck.preLeaderId].Call("KVServer.PutAppend", &args, &reply)
+
 		if !ok || reply.WrongLeader {
 			ck.preLeaderId = mrand.Intn(len(ck.servers))
 		} else if reply.Err == "" {
+			ck.DPrintf("PutAppend Done: Key: %s; Value: %s, Op: %s", key, value, op)
 			return
+		} else {
+			ck.DPrintf("PutAppend What's Wrong: reply: %v", reply)
 		}
 	}
 }
