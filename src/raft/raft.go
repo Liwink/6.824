@@ -31,6 +31,8 @@ import (
 // import "bytes"
 // import "labgob"
 
+const debug = false
+
 type PersistData struct {
 	CurrentTerm int
 	VotedFor 	int
@@ -100,15 +102,19 @@ type Raft struct {
 }
 
 func (rf *Raft)log(str string)  {
-	fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
+	if debug {
+		fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
+	}
 }
 
 func (rf *Raft) logEntries()  {
-	fmt.Println(rf.me, rf.currentTerm, rf.currentState, rf.name)
-	for _, e := range rf.logs {
-		fmt.Printf("%d-(%d)-%d; ", e.Index, e.Term, e.Command)
+	if debug {
+		fmt.Println(rf.me, rf.currentTerm, rf.currentState, rf.name)
+		for _, e := range rf.logs {
+			fmt.Printf("%d-(%d)-%d; ", e.Index, e.Term, e.Command)
+		}
+		fmt.Print("\n")
 	}
-	fmt.Print("\n")
 }
 
 // return currentTerm and whether this server
@@ -130,7 +136,6 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	rf.log(fmt.Sprintf("persist persister"))
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	logs := rf.logs
@@ -225,6 +230,9 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) apply(applyIndex int)  {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if applyIndex >= len(rf.logs) {
 		return
 	}
@@ -340,6 +348,7 @@ func (rf *Raft) sendHeartbeats() {
 			continue
 		}
 		go func(i int) {
+			rf.mu.Lock()
 			args := AppendEntriesArgs{
 				currentTerm,
 				rf.me,
@@ -351,8 +360,13 @@ func (rf *Raft) sendHeartbeats() {
 				heartbeatIndex,
 			}
 			reply := AppendEntriesReply{}
+			rf.mu.Unlock()
 			ok := rf.sendAppendEntries(i, &args, &reply)
+
+			rf.mu.Lock()
 			rf.log(fmt.Sprintf("received %d response from %d: %v, %v", heartbeatIndex, i, ok, reply.Success))
+			rf.mu.Unlock()
+
 			if ok && reply.Success == true {
 				aliveChan <- struct{}{}
 			}
@@ -404,6 +418,11 @@ func (rf *Raft) appendEntries(commitIndex int) {
 	// TODO: stop it when changing leader...?
 	rf.mu.Lock()
 	rf.isSendingLog = true
+
+	rf.log(fmt.Sprintf("appendEntries: %d", commitIndex))
+	rf.log(fmt.Sprintf("nextIndex: %v", rf.nextIndex))
+	rf.log(fmt.Sprintf("matchIndex: %v", rf.matchIndex))
+
 	rf.mu.Unlock()
 
 	defer func() {
@@ -411,10 +430,6 @@ func (rf *Raft) appendEntries(commitIndex int) {
 		rf.isSendingLog = false
 		rf.mu.Unlock()
 	}()
-
-	rf.log(fmt.Sprintf("appendEntries: %d", commitIndex))
-	rf.log(fmt.Sprintf("nextIndex: %v", rf.nextIndex))
-	rf.log(fmt.Sprintf("matchIndex: %v", rf.matchIndex))
 
 	receivedCh := make(chan struct{}, rf.totalNum)
 	done := make(chan struct{}, 1)
@@ -453,6 +468,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 					rf.applyIndex,
 					rf.heartbeatIndex,
 				}
+				currentTerm := rf.currentTerm
 				rf.mu.Unlock()
 
 				reply := AppendEntriesReply{}
@@ -470,7 +486,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 					rf.mu.Unlock()
 					receivedCh <- struct{}{}
 					return
-				} else if reply.Term > rf.currentTerm {
+				} else if reply.Term > currentTerm {
 					// TODO
 					rf.log("CurrentTerm is behind")
 					return
@@ -782,8 +798,8 @@ func (rf *Raft) Kill() {
 	rf.log("Kill")
 	rf.killChan <- struct{}{}
 	rf.killChan <- struct{}{}
-	rf.mu.Unlock()
 	rf.persist()
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) electionDaemon() {
@@ -835,8 +851,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.name = rand.Intn(10000)
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.log("make")
-	rf.mu.Unlock()
 
 	// Your initialization code here (2A, 2B, 2C).
 	// todo: 2a
