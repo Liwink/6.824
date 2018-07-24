@@ -88,6 +88,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	reply.WrongLeader = false
 
 	kv.mu.Lock()
+	if _, ok := kv.cmdC[args.UniqueId]; ok {
+		kv.mu.Unlock()
+		return
+	}
+
 	ch := make(chan interface{}, 1)
 	kv.cmdC[args.UniqueId] = ch
 	kv.mu.Unlock()
@@ -115,8 +120,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrTimeout
 	}
 	kv.DPrintf("PutAppend Done; args: %v, reply: %v", args, reply)
-	reply.WrongLeader = false
-	return
 
 }
 
