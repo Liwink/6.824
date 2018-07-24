@@ -55,11 +55,15 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	var ok bool
 	reply.WrongLeader = false
 
-	kv.cmdC[args.UniqueId] = make(chan interface{}, 1)
+	kv.mu.Lock()
+	ch := make(chan interface{}, 1)
+	kv.cmdC[args.UniqueId] = ch
+	kv.mu.Unlock()
+
 	kv.rf.Start(args.UniqueId)
 
 	select {
-	case <-kv.cmdC[args.UniqueId]:
+	case <-ch:
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
 		reply.Value, ok = kv.result[args.Key]
@@ -83,8 +87,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.DPrintf("PutAppend; args: %v", args)
 	reply.WrongLeader = false
 
+	kv.mu.Lock()
 	ch := make(chan interface{}, 1)
 	kv.cmdC[args.UniqueId] = ch
+	kv.mu.Unlock()
+
 	kv.rf.Start(args.UniqueId)
 
 	// fixme: timeout?
