@@ -863,14 +863,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// heartbeats
 	go func() {
-		for {
-			time.Sleep(150 * time.Millisecond)
+		for range time.Tick(150 * time.Millisecond) {
 			select {
 			case <-rf.killChan:
 				return
 			default:
-
 			}
+
 			rf.mu.Lock()
 			if rf.currentState == leaderState {
 				go rf.sendHeartbeats()
