@@ -88,8 +88,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	args := PutAppendArgs{key, value, op, nrand()}
 
-	ck.DPrintf("PutAppend: Key: %s; Value: %s, Op: %s", key, value, op)
-
 	for true {
 		reply := PutAppendReply{}
 		ok := ck.servers[ck.preLeaderId].Call("KVServer.PutAppend", &args, &reply)

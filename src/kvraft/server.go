@@ -4,12 +4,36 @@ import (
 	"labgob"
 	"labrpc"
 	//"log"
-	"raft"
-	"sync"
 	"fmt"
+	"raft"
+	"strings"
+	"sync"
+	"time"
 )
 
-const Debug = 0
+const Debug = 1
+
+type Cmd struct {
+	Key   string
+	Value string
+	Op    string
+	// fixme: int64?
+	UniqueId string
+}
+
+func dump(cmd Cmd) string {
+	return fmt.Sprintf("%s;%s;%s;%s", cmd.Key, cmd.Value, cmd.Op, cmd.UniqueId)
+}
+
+func load(str string) Cmd {
+	s := strings.Split(str, ";")
+	return Cmd{
+		s[0],
+		s[1],
+		s[2],
+		s[3],
+	}
+}
 
 type Op struct {
 	// Your definitions here.
@@ -26,9 +50,10 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	meetIndex int
-	cmdC      map[interface{}]chan interface{}
-	result    map[string]string
+	meetIndex    int
+	cmdC         map[string]chan interface{}
+	result       map[string]string
+	committedCmd map[string]bool
 }
 
 func (kv *KVServer) DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -55,12 +80,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	var ok bool
 	reply.WrongLeader = false
 
+	cmd := Cmd{
+		Key:      args.Key,
+		Op:       "Get",
+		UniqueId: fmt.Sprintf("%v", args.UniqueId),
+	}
+
 	kv.mu.Lock()
 	ch := make(chan interface{}, 1)
-	kv.cmdC[args.UniqueId] = ch
+	kv.cmdC[cmd.UniqueId] = ch
 	kv.mu.Unlock()
 
-	kv.rf.Start(args.UniqueId)
+	kv.rf.Start(dump(cmd))
 
 	select {
 	case <-ch:
@@ -84,58 +115,68 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = "WrongLeader"
 		return
 	}
+
 	kv.DPrintf("PutAppend; args: %v", args)
 	reply.WrongLeader = false
 
+	cmd := Cmd{
+		args.Key,
+		args.Value,
+		args.Op,
+		fmt.Sprintf("%v", args.UniqueId),
+	}
+
 	kv.mu.Lock()
-	if _, ok := kv.cmdC[args.UniqueId]; ok {
+
+	if _, ok := kv.committedCmd[cmd.UniqueId]; ok {
 		kv.mu.Unlock()
 		return
 	}
 
 	ch := make(chan interface{}, 1)
-	kv.cmdC[args.UniqueId] = ch
+	kv.cmdC[cmd.UniqueId] = ch
+
 	kv.mu.Unlock()
 
-	kv.rf.Start(args.UniqueId)
-
-	// fixme: timeout?
-	timeoutC := make(chan interface{})
-	//go func() {
-	//	time.Sleep(300 * time.Millisecond)
-	//	timeoutC <- struct {}{}
-	//}()
+	kv.rf.Start(dump(cmd))
 
 	select {
 	case <-ch:
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
 		reply.Err = ""
-		if args.Op == "Put" {
-			kv.result[args.Key] = args.Value
-		} else if args.Op == "Append" {
-			kv.result[args.Key] += args.Value
-		}
-	case <-timeoutC:
+	// fixme: timeout?
+	case <-time.After(time.Hour):
 		reply.Err = ErrTimeout
 	}
 	kv.DPrintf("PutAppend Done; args: %v, reply: %v", args, reply)
-
 }
 
 func (kv *KVServer) listenApply() {
-	var ok bool
 	for true {
 		msg := <-kv.applyCh
+		kv.DPrintf("Listen & Get msg %v", msg)
 		kv.mu.Lock()
-		if msg.CommandValid && msg.CommandIndex > kv.meetIndex {
-			_, ok = kv.cmdC[msg.Command]
+		// fixme: order by commandIndex
+		// slidingWindow?
+
+		cmd := load(msg.Command.(string))
+		_, ok := kv.committedCmd[cmd.UniqueId]
+		if msg.CommandValid && msg.CommandIndex > kv.meetIndex && !ok {
+
+			// apply to kv
+			if cmd.Op == "Put" {
+				kv.result[cmd.Key] = cmd.Value
+			} else if cmd.Op == "Append" {
+				kv.result[cmd.Key] += cmd.Value
+			}
+
+			_, ok = kv.cmdC[cmd.UniqueId]
 			if ok {
 				go func() {
-					kv.cmdC[msg.Command] <- struct{}{}
+					kv.cmdC[cmd.UniqueId] <- struct{}{}
 				}()
 			}
 			kv.meetIndex = msg.CommandIndex
+			kv.committedCmd[cmd.UniqueId] = true
 		}
 		kv.mu.Unlock()
 	}
@@ -178,7 +219,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.meetIndex = -1
 	kv.result = make(map[string]string)
-	kv.cmdC = make(map[interface{}]chan interface{})
+	kv.cmdC = make(map[string]chan interface{})
+	kv.committedCmd = make(map[string]bool)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
