@@ -31,6 +31,7 @@ import (
 // import "bytes"
 // import "labgob"
 
+//const debug = true
 const debug = false
 
 type PersistData struct {
@@ -334,7 +335,6 @@ func (rf *Raft) sendHeartbeats() {
 	heartbeatIndex := rf.heartbeatIndex
 	rf.mu.Unlock()
 
-	timeoutChan := make(chan struct{}, 1)
 	aliveChan := make(chan struct{}, rf.totalNum)
 	done := make(chan struct{}, 1)
 	for i := 0; i < rf.totalNum; i++ {
@@ -373,18 +373,13 @@ func (rf *Raft) sendHeartbeats() {
 		done <- struct{}{}
 	}()
 
-	go func() {
-		time.Sleep(250 * time.Millisecond)
-		timeoutChan <- struct{}{}
-	}()
-
 	select {
 	case <-done:
 		rf.mu.Lock()
 		rf.log(fmt.Sprintf("received majority responses %d", heartbeatIndex))
 		rf.isLeaderAlive = true
 		rf.mu.Unlock()
-	case <-timeoutChan:
+	case <-time.After(250 * time.Millisecond):
 		rf.mu.Lock()
 		rf.log(fmt.Sprintf("did not get majority responses, timeout %d", heartbeatIndex))
 		rf.mu.Unlock()
@@ -427,7 +422,6 @@ func (rf *Raft) appendEntries(commitIndex int) {
 
 	receivedCh := make(chan struct{}, rf.totalNum)
 	done := make(chan struct{}, 1)
-	timeoutCh := make(chan struct{}, 1)
 	finishCh := make(chan struct{}, 1)
 
 	for i := 0; i < rf.totalNum; i++ {
@@ -520,11 +514,6 @@ func (rf *Raft) appendEntries(commitIndex int) {
 		finishCh <- struct{}{}
 	}()
 
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		timeoutCh <- struct{}{}
-	}()
-
 	for {
 		select {
 		case <-done:
@@ -538,7 +527,7 @@ func (rf *Raft) appendEntries(commitIndex int) {
 				go rf.apply(commitIndex)
 			}
 			rf.mu.Unlock()
-		case <-timeoutCh:
+		case <-time.After(150 * time.Millisecond):
 			rf.mu.Lock()
 			rf.log(fmt.Sprintf("leader: wait for appendEntities %d, timeout", commitIndex))
 			rf.mu.Unlock()
@@ -664,7 +653,6 @@ func (rf *Raft) sendRequestVotes() {
 	rf.mu.Unlock()
 
 	responseChan := make(chan bool, rf.totalNum)
-	timeout := make(chan struct{}, 1)
 
 	// requests RPCs in parallel
 	for i := 0; i < rf.totalNum; i++ {
@@ -699,10 +687,6 @@ func (rf *Raft) sendRequestVotes() {
 	// a. it wins the election
 	// b. another server establish itself as a leader
 	// c. a period of time goes by with no winner
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		timeout <- struct{}{}
-	}()
 
 	// fixme: lock?
 	select {
@@ -725,7 +709,7 @@ func (rf *Raft) sendRequestVotes() {
 
 		go rf.sendHeartbeats()
 		//case <-rf.electionTimeoutChan:
-	case <-timeout:
+	case <-time.After(300 * time.Millisecond):
 		rf.mu.Lock()
 		rf.currentState = followState
 		rf.log("candidate: sendRequestVotes timeout")
