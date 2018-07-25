@@ -4,14 +4,15 @@ import "labrpc"
 import "crypto/rand"
 import mrand "math/rand"
 import (
-	"math/big"
 	"fmt"
+	"math/big"
 )
 
 type Clerk struct {
 	preLeaderId int
 	servers     []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	name int
 }
 
 func nrand() int64 {
@@ -26,6 +27,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	ck.preLeaderId = 0
 	// You'll have to add code here.
+
+	ck.name = mrand.Intn(1000)
 	return ck
 }
 
@@ -87,6 +90,8 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	args := PutAppendArgs{key, value, op, nrand()}
+
+	ck.DPrintf("PutAppend %s: Key: %s; Value %s", op, key, value)
 
 	for true {
 		reply := PutAppendReply{}

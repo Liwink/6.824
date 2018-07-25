@@ -5,13 +5,15 @@ import (
 	"labrpc"
 	//"log"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"raft"
 	"strings"
 	"sync"
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 type Cmd struct {
 	Key   string
@@ -159,24 +161,28 @@ func (kv *KVServer) listenApply() {
 		// slidingWindow?
 
 		cmd := load(msg.Command.(string))
-		_, ok := kv.committedCmd[cmd.UniqueId]
-		if msg.CommandValid && msg.CommandIndex > kv.meetIndex && !ok {
+		//_, ok := kv.committedCmd[cmd.UniqueId]
+		if msg.CommandValid {
+			//if msg.CommandValid && msg.CommandIndex > kv.meetIndex && !ok {
 
 			// apply to kv
-			if cmd.Op == "Put" {
-				kv.result[cmd.Key] = cmd.Value
-			} else if cmd.Op == "Append" {
-				kv.result[cmd.Key] += cmd.Value
+			_, ok := kv.committedCmd[cmd.UniqueId]
+			if !ok {
+				if cmd.Op == "Put" {
+					kv.result[cmd.Key] = cmd.Value
+				} else if cmd.Op == "Append" {
+					kv.result[cmd.Key] += cmd.Value
+				}
+
+				kv.committedCmd[cmd.UniqueId] = true
 			}
 
 			_, ok = kv.cmdC[cmd.UniqueId]
 			if ok {
-				go func() {
-					kv.cmdC[cmd.UniqueId] <- struct{}{}
-				}()
+				kv.cmdC[cmd.UniqueId] <- struct{}{}
+				delete(kv.cmdC, cmd.UniqueId)
 			}
 			kv.meetIndex = msg.CommandIndex
-			kv.committedCmd[cmd.UniqueId] = true
 		}
 		kv.mu.Unlock()
 	}
@@ -226,6 +232,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+
+	go func() {
+		kv.DPrintf("Run pprof: %v", http.ListenAndServe("localhost:6060", nil))
+	}()
 
 	go kv.listenApply()
 
