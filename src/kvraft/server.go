@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"container/heap"
 )
 
 const Debug = 0
@@ -21,19 +22,20 @@ type Cmd struct {
 	Op    string
 	// fixme: int64?
 	UniqueId string
+	Index    int
 }
 
 func dump(cmd Cmd) string {
-	return fmt.Sprintf("%s;%s;%s;%s", cmd.Key, cmd.Value, cmd.Op, cmd.UniqueId)
+	return fmt.Sprintf("%s;%s;%s;%s", cmd.Op, cmd.Key, cmd.Value, cmd.UniqueId)
 }
 
 func load(str string) Cmd {
 	s := strings.Split(str, ";")
 	return Cmd{
-		s[0],
-		s[1],
-		s[2],
-		s[3],
+		Op: s[0],
+		Key: s[1],
+		Value: s[2],
+		UniqueId: s[3],
 	}
 }
 
@@ -52,10 +54,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	meetIndex    int
+	nextCmdIndex int
 	cmdC         map[string]chan interface{}
 	result       map[string]string
 	committedCmd map[string]bool
+	cmdHeap      *CmdHeap
 }
 
 func (kv *KVServer) DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -126,6 +129,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		args.Value,
 		args.Op,
 		fmt.Sprintf("%v", args.UniqueId),
+		0,
 	}
 
 	kv.mu.Lock()
@@ -156,16 +160,33 @@ func (kv *KVServer) listenApply() {
 	for true {
 		msg := <-kv.applyCh
 		kv.DPrintf("Listen & Get msg %v", msg)
+
 		kv.mu.Lock()
+
 		// fixme: order by commandIndex
 		// slidingWindow?
 
-		cmd := load(msg.Command.(string))
-		//_, ok := kv.committedCmd[cmd.UniqueId]
-		if msg.CommandValid {
-			//if msg.CommandValid && msg.CommandIndex > kv.meetIndex && !ok {
+		command := load(msg.Command.(string))
+		command.Index = msg.CommandIndex
 
-			// apply to kv
+		if !msg.CommandValid {
+			break
+		}
+
+		heap.Push(kv.cmdHeap, &command)
+
+		for true {
+			if kv.cmdHeap.Len() == 0 { break }
+
+			cmd := heap.Pop(kv.cmdHeap).(*Cmd)
+			if cmd.Index != kv.nextCmdIndex {
+				kv.DPrintf("cmd.Index: %d; kv.nextCmdIndex: %d", cmd.Index, kv.nextCmdIndex)
+				heap.Push(kv.cmdHeap, cmd)
+				break
+			}
+
+			//fmt.Printf("!!!!! %v\n", cmd)
+			//fmt.Printf("!!!!! %v\n", cmd.Op)
 			_, ok := kv.committedCmd[cmd.UniqueId]
 			if !ok {
 				if cmd.Op == "Put" {
@@ -175,6 +196,7 @@ func (kv *KVServer) listenApply() {
 				}
 
 				kv.committedCmd[cmd.UniqueId] = true
+				//fmt.Printf("????? %v\n", kv.result)
 			}
 
 			_, ok = kv.cmdC[cmd.UniqueId]
@@ -182,8 +204,10 @@ func (kv *KVServer) listenApply() {
 				kv.cmdC[cmd.UniqueId] <- struct{}{}
 				delete(kv.cmdC, cmd.UniqueId)
 			}
-			kv.meetIndex = msg.CommandIndex
+
+			kv.nextCmdIndex++
 		}
+
 		kv.mu.Unlock()
 	}
 }
@@ -223,13 +247,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.meetIndex = -1
+	kv.nextCmdIndex = 1
 	kv.result = make(map[string]string)
 	kv.cmdC = make(map[string]chan interface{})
 	kv.committedCmd = make(map[string]bool)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.cmdHeap = &CmdHeap{}
+
+	heap.Init(kv.cmdHeap)
 
 	// You may need initialization code here.
 
