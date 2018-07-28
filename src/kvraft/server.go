@@ -108,6 +108,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Err = ""
 		}
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = ErrTimeout
 	}
 	kv.DPrintf("Get Done; args: %v; reply: %v", args, reply)
 
@@ -150,7 +152,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case <-ch:
 		reply.Err = ""
 	// fixme: timeout?
-	case <-time.After(time.Hour):
+	case <-time.After(300 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
 	kv.DPrintf("PutAppend Done; args: %v, reply: %v", args, reply)
@@ -185,8 +187,6 @@ func (kv *KVServer) listenApply() {
 				break
 			}
 
-			//fmt.Printf("!!!!! %v\n", cmd)
-			//fmt.Printf("!!!!! %v\n", cmd.Op)
 			_, ok := kv.committedCmd[cmd.UniqueId]
 			if !ok {
 				if cmd.Op == "Put" {
@@ -196,7 +196,6 @@ func (kv *KVServer) listenApply() {
 				}
 
 				kv.committedCmd[cmd.UniqueId] = true
-				//fmt.Printf("????? %v\n", kv.result)
 			}
 
 			_, ok = kv.cmdC[cmd.UniqueId]
