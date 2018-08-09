@@ -14,7 +14,7 @@ import (
 	"container/heap"
 )
 
-const Debug = 0
+const Debug = 1
 
 type Cmd struct {
 	Key   string
@@ -108,7 +108,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Err = ""
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(500 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
 	kv.DPrintf("Get Done; args: %v; reply: %v", args, reply)
@@ -152,7 +152,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case <-ch:
 		reply.Err = ""
 	// fixme: timeout?
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(500 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
 	kv.DPrintf("PutAppend Done; args: %v, reply: %v", args, reply)

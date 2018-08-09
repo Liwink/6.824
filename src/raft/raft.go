@@ -31,8 +31,9 @@ import (
 // import "bytes"
 // import "labgob"
 
-//const debug = true
-const debug = false
+const debug = true
+//const debug = false
+const info = true
 
 type PersistData struct {
 	CurrentTerm int
@@ -99,6 +100,12 @@ type Raft struct {
 
 	isSendingLog   bool
 	heartbeatIndex int
+}
+
+func (rf *Raft) logI(str string) {
+	if info {
+		fmt.Println(rf.me, rf.currentTerm, rf.currentState, str, rf.name)
+	}
 }
 
 func (rf *Raft) log(str string) {
@@ -240,7 +247,7 @@ func (rf *Raft) apply(applyIndex int) {
 			// FIXME: +1 to meet the test index requirement
 			i + 1,
 		}
-		rf.log(fmt.Sprintf("Apply: %d, %d", i, rf.logs[i].Command))
+		rf.logI(fmt.Sprintf("Apply: %d, %d", i, rf.logs[i].Command))
 	}
 
 	if applyIndex > rf.commitIndex {
@@ -703,7 +710,7 @@ func (rf *Raft) sendRequestVotes() {
 		for i := range rf.nextIndex {
 			rf.nextIndex[i] = rf.commitIndex + 1
 		}
-		rf.log("candidate: selected as a leader")
+		rf.logI("candidate: selected as a leader")
 		rf.logEntries()
 		rf.mu.Unlock()
 
@@ -737,7 +744,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 
 	if rf.currentState == leaderState {
-		rf.log(fmt.Sprintf("start %v", command))
+		rf.logI(fmt.Sprintf("start %v", command))
 	}
 
 	if rf.currentState != leaderState {

@@ -69,6 +69,8 @@ func (ck *Clerk) Get(key string) string {
 		} else if reply.Err == "" {
 			ck.DPrintf("Get Done: Key: %s; Value: %s", key, reply.Value)
 			return reply.Value
+		} else {
+			ck.preLeaderId = mrand.Intn(len(ck.servers))
 		}
 	}
 
@@ -104,6 +106,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			return
 		} else {
 			ck.DPrintf("PutAppend What's Wrong: reply: %v", reply)
+			ck.preLeaderId = mrand.Intn(len(ck.servers))
 		}
 	}
 }
